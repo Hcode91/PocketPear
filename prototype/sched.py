@@ -88,7 +88,7 @@ class Scheduler:
         self.emu.uc.emu_stop()
 
     def runnable(self, t, now):
-        if t.dead:
+        if t.dead or getattr(t, 'suspended', 0):
             return False
         if t.ready is None:
             return True

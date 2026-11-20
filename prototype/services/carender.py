@@ -21,6 +21,10 @@ class RenderServer(MigServer):
         return self.reply(req, ret=0)
 
     def msg_40215(self, req):
+        self.info_calls = getattr(self, 'info_calls', 0) + 1
+        if self.info_calls in (2, 1000):
+            print(f'[carender] 40215 call #{self.info_calls} from:')
+            self.k.emu.backtrace(30)
         # Read by QuartzCore before registering: out-of-line data plus a count.
         r = self.reply(req, data=struct.pack('<I', 0), ool=[b''])
         return [(r, self.take_ool())]

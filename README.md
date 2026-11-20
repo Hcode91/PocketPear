@@ -31,7 +31,7 @@ libdispatch, Foundation and the app's initialisers run, `UIApplicationMain` chec
 the backboard stand-in sends the GraphicsServices application-launch event (type 2000), UIKit
 registers a render context with the CARenderServer stand-in, the app delegate's
 `applicationDidFinishLaunching` runs, preferences are saved in the container, and the game's
-Mono runtime starts loading `Data/Managed`. Core Animation commits arrive at the render server
+Mono runtime loads `mscorlib` and the game's assemblies; it stops at "gfx device initialization failed", i.e. OpenGL ES. Core Animation commits arrive at the render server
 stand-in but are not drawn yet.
 
 pthread mutexes, condition variables and rwlocks are implemented at the libsystem_c function

@@ -42,6 +42,8 @@ DARWIN_ERRNO = {errno.ELOOP: 62, errno.ENAMETOOLONG: 63, errno.ENOTEMPTY: 66, er
                 errno.EAGAIN: 35, errno.EINPROGRESS: 36, errno.EALREADY: 37, errno.ENOTSUP: 45,
                 errno.ETIMEDOUT: 60, errno.ECONNREFUSED: 61}
 
+TRACE_FROM = int(os.environ.get('PP_TRACE_FROM', 0)) or -1     # start TRACE_SYS at this call number
+
 import json as _json
 # Numbers and names come from libsystem_kernel's own stubs (bsdnums.json, made by
 # tools/sysnums.py); the entries below only rename calls whose iOS 6 stub is the 64-bit-inode
@@ -142,6 +144,8 @@ class Kernel:
         if num & 0x80000000:
             num -= 1 << 32
         self.calls += 1
+        if self.calls == TRACE_FROM:
+            self.emu.trace_sys = True
         if self.calls % 512 == 0 and len(self.emu.sched.threads) > 1 and self.emu.sched.cur.ready is None:
             self._yield_after = True
         if self.emu.trace_sys:
@@ -393,9 +397,13 @@ class Kernel:
 
     def sys_getrlimit(self):
         res, p = self.args(2)
-        self.emu.write(p, struct.pack('<QQ', 0x7fffffffffffffff, 0x7fffffffffffffff) if res != 8 else struct.pack('<QQ', 256, 10240))
+        res &= 0xff                              # the UNIX2003 wrappers add _RLIMIT_POSIX_FLAG (0x1000)
+        limits = {8: (256, 10240), 3: (1 << 20, 1 << 20)}      # RLIMIT_NOFILE, RLIMIT_STACK
+        cur, mx = limits.get(res, (0x7fffffffffffffff, 0x7fffffffffffffff))
+        self.emu.write(p, struct.pack('<QQ', cur, mx))
         self.ret(0)
     def sys_setrlimit(self): self.ret(0)
+    def sys_getdtablesize(self): self.ret(256)
 
     # --- files
     def guest_path(self, p):
@@ -448,7 +456,7 @@ class Kernel:
 
     def sys_ftruncate(self):
         gfd = self.args(1)[0]
-        length = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)
+        length = self.uc.reg_read(UC_ARM_REG_R1) | (self.uc.reg_read(UC_ARM_REG_R2) << 32)
         fd = self.hostfd(gfd)
         if fd is None:
             self.ret(EBADF, True); return
@@ -524,8 +532,7 @@ class Kernel:
         fd = self.hostfd(gfd)
         if fd is None:
             self.ret(EBADF, True); return
-        # 64-bit offset is passed in r4/r5 (aligned pair after the 3 args: r3 is padding)
-        off = off_lo | (off_hi << 32) if False else (self.uc.reg_read(UC_ARM_REG_R4) | (self.uc.reg_read(UC_ARM_REG_R5) << 32))
+        off = off_lo | (off_hi << 32)            # off_t in r3:r4 (Apple's ABI leaves it unaligned)
         data = os.pread(fd, n, off)
         self.emu.write(buf, data)
         self.ret(len(data))
@@ -582,10 +589,10 @@ class Kernel:
 
     def sys_lseek(self):
         gfd = self.args(1)[0]
-        off = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)
-        # off_t takes the even pair r2:r3 (AAPCS), so whence is on the caller's stack: the
-        # kernel copies arguments past r3 from there when the stub loads none into r4-r6.
-        whence = self.emu.r32(self.uc.reg_read(UC_ARM_REG_SP))
+        # Apple's armv7 ABI does not align 64-bit arguments to an even register pair: off_t
+        # is r1:r2 and whence is r3 (and on the stack such arguments are only 4-aligned).
+        off = self.uc.reg_read(UC_ARM_REG_R1) | (self.uc.reg_read(UC_ARM_REG_R2) << 32)
+        whence = self.uc.reg_read(UC_ARM_REG_R3)
         fd = self.hostfd(gfd)
         if fd is None:
             self.ret(EBADF, True); return
@@ -631,7 +638,7 @@ class Kernel:
         if fd is None:
             path_p, buf = self.args(2)
             path = self.guest_path(path_p)
-            host = self.emu.host_path(path)
+            host = self.emu.host_path(path) if follow else self.emu.host_path_raw(path)
             try:
                 st = os.stat(host) if follow else os.lstat(host)
             except OSError as e:
@@ -662,11 +669,16 @@ class Kernel:
         path = self.guest_path(path_p)
         ok = os.path.exists(self.emu.host_path(path))
         self.log(f'access({path!r}) = {ok}')
+        if os.environ.get('BT_ON_PATH') and os.environ['BT_ON_PATH'] in path:
+            self.emu.backtrace(20)
         self.ret(0) if ok else self.ret(ENOENT, True)
 
     def sys_readlink(self):
         path_p, buf, size = self.args(3)
-        host = self.emu.host_path(self.guest_path(path_p))
+        host = self.emu.host_path_raw(self.guest_path(path_p))
+        self.log(f'readlink({self.guest_path(path_p)!r}) host {host!r}')
+        if not os.path.lexists(host):
+            self.ret(ENOENT, True); return
         if not os.path.islink(host):
             self.ret(EINVAL, True); return
         t = os.readlink(host).encode()[:size]
@@ -677,7 +689,7 @@ class Kernel:
     # --- memory
     def sys_mmap(self):
         addr, length, prot, flags, gfd = self.args(5)
-        off = self.uc.reg_read(UC_ARM_REG_R6) | (self.uc.reg_read(UC_ARM_REG_R8) << 32)
+        off = self.uc.reg_read(UC_ARM_REG_R5) | (self.uc.reg_read(UC_ARM_REG_R6) << 32)   # fd r4, off_t r5:r6
         if gfd == 0xffffffff:
             gfd = -1
         MAP_FIXED, MAP_ANON = 0x10, 0x1000

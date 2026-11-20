@@ -156,7 +156,17 @@ class Emulator:
         return out.decode('utf-8', 'replace')
 
     # -------------------------------------------------------------- paths
+    def host_path_raw(self, guest):
+        """The host path of a guest path without following its symlinks (for lstat and readlink)."""
+        if guest.startswith('/private/var/mobile/Applications/'):
+            guest = guest[len('/private'):]
+        if guest.startswith(self.app_guest) or guest.startswith(CONTAINER) or guest in DEVICES:
+            return self.host_path(guest)
+        return self.rootfs + guest
+
     def host_path(self, guest):
+        if guest.startswith('/private/var/mobile/Applications/'):
+            guest = guest[len('/private'):]      # /var is a link to /private/var on the device
         if guest.startswith(self.app_guest):
             return self.app_dir + guest[len(self.app_guest):]
         if guest.startswith(CONTAINER):

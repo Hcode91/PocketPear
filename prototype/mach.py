@@ -19,7 +19,9 @@ NAMES = {200: 'host_info', 201: 'host_kernel_version', 202: 'host_page_size', 20
          4800: 'mach_vm_allocate', 4801: 'mach_vm_deallocate', 4802: 'mach_vm_protect', 4811: 'mach_vm_map',
          4816: 'mach_vm_region', 3800: 'vm_region', 3801: 'vm_allocate', 3802: 'vm_deallocate', 3803: 'vm_protect',
          3812: 'vm_map', 3612: 'thread_info', 3616: 'thread_policy', 3617: 'thread_policy_set', 3618: 'thread_policy_get',
-         1000: 'clock_get_time', 1001: 'clock_get_attributes', 404: 'bootstrap_look_up'}
+         1000: 'clock_get_time', 1001: 'clock_get_attributes', 404: 'bootstrap_look_up',
+         3600: 'thread_terminate', 3605: 'thread_suspend', 3606: 'thread_resume', 3603: 'thread_get_state',
+         3604: 'thread_set_state', 3402: 'task_threads'}
 
 
 import json, os
@@ -170,6 +172,66 @@ class MachMsg:
         which, = struct.unpack_from('<i', body, 8)
         return ([self.k.new_port(f'clock{which}')], None)
     def mig_mach_port_deallocate(self, body, port): return struct.pack('<i', KERN_SUCCESS)
+
+    # ---------------------------------------------------------------- threads
+    ARM_REGS = None
+
+    def thread_for(self, port):
+        for t in self.emu.sched.threads:
+            if t.port == port and not t.dead:
+                return t
+        return None
+
+    def mig_task_threads(self, body, port):
+        ports = [t.port for t in self.emu.sched.threads if not t.dead]
+        a = self.emu.find_free(4096)
+        self.emu.map(a, 4096)
+        self.emu.write(a, struct.pack(f'<{len(ports)}I', *ports))
+        desc = struct.pack('<IIBBBB', a, len(ports), 1, 0, 0x11, 2)
+        return bytearray(struct.pack('<I', 1) + desc + NDR + struct.pack('<I', len(ports)))
+
+    def mig_thread_suspend(self, body, port):
+        t = self.thread_for(port)
+        if t is None:
+            return struct.pack('<i', 15)
+        t.suspended = getattr(t, 'suspended', 0) + 1
+        return struct.pack('<i', KERN_SUCCESS)
+
+    def mig_thread_resume(self, body, port):
+        t = self.thread_for(port)
+        if t is None:
+            return struct.pack('<i', 15)
+        t.suspended = max(0, getattr(t, 'suspended', 0) - 1)
+        return struct.pack('<i', KERN_SUCCESS)
+
+    def regs(self):
+        from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC,
+                                       UC_ARM_REG_CPSR)
+        return [UC_ARM_REG_R0 + i for i in range(13)] + [UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR]
+
+    def mig_thread_get_state(self, body, port):
+        flavor, count = struct.unpack_from('<iI', body, 8)
+        t = self.thread_for(port)
+        if t is None:
+            return struct.pack('<i', 15)
+        if flavor != 1:                       # ARM_THREAD_STATE only
+            return struct.pack('<i', KERN_INVALID_ARGUMENT)
+        if t is self.emu.sched.cur:
+            vals = [self.emu.uc.reg_read(r) for r in self.regs()]
+        else:
+            vals = [t.ctx.reg_read(r) for r in self.regs()]
+        n = min(count, 17)
+        return struct.pack('<iI', KERN_SUCCESS, n) + struct.pack(f'<{n}I', *vals[:n])
+
+    def mig_thread_set_state(self, body, port):
+        flavor, count = struct.unpack_from('<iI', body, 8)
+        t = self.thread_for(port)
+        if t is None or flavor != 1 or t is self.emu.sched.cur:
+            return struct.pack('<i', KERN_INVALID_ARGUMENT)
+        vals = struct.unpack_from(f'<{min(count, 17)}I', body, 16)
+        for r, v in zip(self.regs(), vals):
+            t.ctx.reg_write(r, v)
+        return struct.pack('<i', KERN_SUCCESS)
 
     def mig_mach_port_set_context(self, body, port):
         name, ctx = struct.unpack_from('<IQ', body, 8)
