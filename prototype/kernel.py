@@ -184,10 +184,10 @@ class Kernel:
                     self.emu.sched.cur.why = 'preempted at a system call'
                     uc.emu_stop()
             if self.emu.trace_sys:
-                n = self._last[0]
+                n = getattr(self, "_last", (num, []))[0]
                 nm = BSD_NAMES.get(n, '') if n > 0 else MACH_NAMES.get(-n, '')
                 err = ' ERR' if n > 0 and uc.reg_read(UC_ARM_REG_CPSR) & CARRY else ''
-                print(f'[sys] t{self.cur.tid} {n} {nm}{self._last[1]} -> {uc.reg_read(UC_ARM_REG_R0):#x}{err}')
+                print(f'[sys] t{self.cur.tid} {n} {nm}{getattr(self, "_last", (0, []))[1]} -> {uc.reg_read(UC_ARM_REG_R0):#x}{err}')
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -393,6 +393,11 @@ class Kernel:
         elif op == 0x10:                  # WQOPS_QUEUE_NEWSPISUPP: yes, libdispatch requires it
             self.ret(0)
         elif op == 0x20:                  # WQOPS_QUEUE_REQTHREADS: affinity = how many, prio = priority | overcommit
+            self.reqthreads = getattr(self, 'reqthreads', 0) + 1
+            if os.environ.get('BT_REQTHREADS') and self.reqthreads in (300, 301, 302):
+                print(f'[kernel] REQTHREADS #{self.reqthreads} from thread {self.cur.tid}')
+                self.emu.trace_sys = True
+                self.emu.backtrace()
             for _ in range(max(1, affinity)):
                 t = self.wq_thread(0, 0x40000 | (prio & 0x1ffff))
                 print(f'[kernel] workq thread {t.tid} (priority {prio & 0xffff}{", overcommit" if prio & 0x10000 else ""})')
@@ -684,6 +689,53 @@ class Kernel:
     def sys_lstat64(self): self.do_stat(True, follow=False)
     def sys_fstat64(self): self.do_stat(True, fd=True)
 
+    def sys_getattrlist(self):
+        """getattrlist for the common attributes realpath and CFURL ask for: name, device,
+        filesystem id, object type, tag and object ids. Anything else is ENOTSUP, which the
+        callers treat as "use stat instead"."""
+        path_p, al, buf, size, options = self.args(5)
+        path = self.guest_path(path_p)
+        bitmapcount, _, common, vol, dirattr, fileattr, fork = struct.unpack('<HHIIIII', self.emu.read(al, 24))
+        if bitmapcount != 5 or vol or dirattr or fileattr or fork or common & ~0xff:
+            self.log(f'getattrlist({path!r}) attrs {common:#x}/{vol:#x}/{dirattr:#x}/{fileattr:#x} unsupported')
+            self.ret(45, True)                    # ENOTSUP
+            return
+        host = self.emu.host_path_raw(path) if options & 1 else self.emu.host_path(path)
+        try:
+            st = os.lstat(host) if options & 1 else os.stat(host)
+        except OSError as e:
+            self.ret(e.errno, True)
+            return
+        fixed, names = b'', []
+        objtype = 2 if pystat.S_ISDIR(st.st_mode) else 5 if pystat.S_ISLNK(st.st_mode) else 1
+        ino = st.st_ino & 0xffffffff
+        for bit in range(8):
+            if not common & (1 << bit):
+                continue
+            if bit == 0:                          # ATTR_CMN_NAME: attrreference, filled below
+                names.append(len(fixed))
+                fixed += b'\0' * 8
+            elif bit == 1:                        # DEVID
+                fixed += struct.pack('<I', 0x1000002)
+            elif bit == 2:                        # FSID
+                fixed += struct.pack('<II', 0x1000002, 17)
+            elif bit == 3:                        # OBJTYPE
+                fixed += struct.pack('<I', objtype)
+            elif bit == 4:                        # OBJTAG: VT_HFS
+                fixed += struct.pack('<I', 16)
+            else:                                 # OBJID / OBJPERMANENTID / PAROBJID
+                fixed += struct.pack('<II', ino if bit != 7 else 2, 0)
+        name = (path.rstrip('/').rsplit('/', 1)[-1] or '/').encode() + b'\0'
+        out = bytearray(4 + len(fixed))
+        out[4:] = fixed
+        for at in names:
+            field = 4 + at
+            struct.pack_into('<iI', out, field, len(out) - field, len(name))
+            out += name + b'\0' * (-len(name) % 4)
+        struct.pack_into('<I', out, 0, len(out))
+        self.emu.write(buf, bytes(out[:size]))
+        self.ret(0)
+
     def sys_access(self):
         path_p, mode = self.args(2)
         path = self.guest_path(path_p)
@@ -963,12 +1015,12 @@ class Kernel:
 
     def trap_mach_port_insert_member(self):
         task, name, pset = self.args(3)
-        self.pr.move_member(name, pset)
+        self.pr.insert_member(name, pset)
         self.mret(0)
 
     def trap_mach_port_extract_member(self):
         task, name, pset = self.args(3)
-        self.pr.move_member(name, 0)
+        self.pr.extract_member(name, pset)
         self.mret(0)
     def trap_pid_for_task(self):
         t, p = self.args(2); self.emu.w32(p, 1234); self.mret(0)
@@ -1020,6 +1072,34 @@ class Kernel:
                 self.mret(0)
         self.emu.sched.block(f'semaphore {p.name:#x}', lambda: p.value > 0, complete, timeout)
 
+    def sys___semwait_signal(self):
+        """nanosleep/usleep and the cancelable condition waits: wait on cond_sem until it is
+        signalled or the timeout passes, after signalling mutex_sem. 64-bit tv_sec is r4:r5
+        (Apple armv7 ABI), tv_nsec r6. Times out with ETIMEDOUT, as usleep expects."""
+        from sched import CLOCK
+        cond, mutex, has_timeout, relative, sec_lo, sec_hi, nsec = self.args(7)
+        if mutex:
+            self.sem(mutex).value += 1
+        timeout = None
+        if has_timeout:
+            t = (sec_lo | (sec_hi << 32)) + nsec / 1e9
+            timeout = t if relative else max(0.0, t - CLOCK.wall())
+        p = self.sem(cond) if cond else None
+        if p is not None and p.value > 0:
+            p.value -= 1
+            self.ret(0)
+            return
+        if timeout == 0:
+            self.ret(60, True)
+            return
+        def complete(timed_out):
+            if timed_out:
+                self.ret(60, True)
+            else:
+                p.value -= 1
+                self.ret(0)
+        self.emu.sched.block(f'semwait {cond:#x}', (lambda: p.value > 0) if p else (lambda: False), complete, timeout)
+
     def trap_semaphore_wait(self):
         self.wait_on(self.sem(self.args(1)[0]))
 
@@ -1043,7 +1123,7 @@ class Kernel:
 
     def trap_mk_timer_arm(self):
         name = self.uc.reg_read(UC_ARM_REG_R0)
-        expire = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)   # uint64 in r2:r3
+        expire = self.uc.reg_read(UC_ARM_REG_R1) | (self.uc.reg_read(UC_ARM_REG_R2) << 32)   # uint64 in r1:r2 (Apple armv7 ABI: no even-pair alignment)
         p = self.pr.get(name)
         if p is None:
             self.mret(15); return
@@ -1065,6 +1145,9 @@ class Kernel:
         msg, option, send_size, rcv_size, rcv_name, timeout, notify = self.args(7)
         if option & MACH_SEND_MSG:
             remote = self.emu.r32(msg + 8)
+            if self.emu.trace_sys:
+                print(f'[ipc] t{self.cur.tid} send id {self.emu.r32(msg + 20)} to {remote:#x} '
+                      f'(port {"known" if self.pr.get(remote) else "unknown"}, queue ok {self.pr.can_queue(remote)})')
             server = getattr(self.pr.get(remote), 'server', None)
             if server is not None:
                 from services.base import Request

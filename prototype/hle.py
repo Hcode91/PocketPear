@@ -155,7 +155,10 @@ class Pthreads:
         elif m.owner == me and self.recursive(a):
             m.count += 1; self.ret(0)
         else:
+            # Callers spin on trylock (Unity does). With no time slicing a spinner would never
+            # let the owner run, so a failed trylock yields, as a busy thread would be preempted.
             self.ret(EBUSY)
+            self.sched.block('yield after trylock', lambda: True, lambda timed_out: None)
 
     def pthread_mutex_unlock(self):
         a, = self.args(1)

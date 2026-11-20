@@ -276,7 +276,7 @@ class GLES:
             from PIL import Image
             img = Image.frombuffer('RGBA', (w, h), bytes(buf), 'raw', 'RGBA', 0, -1)
             path = os.path.join(self.out_dir, f'frame{self.frame:05d}.png')
-            img.save(path)
+            img.convert('RGB').save(path)          # the screen is opaque; keep viewers from showing alpha
             print(f'[gles] frame {self.frame} -> {path}')
         except Exception as e:
             print('[gles] could not save frame:', e)
@@ -387,7 +387,7 @@ class GLES:
             sp = self.emu.r32(strings + 4 * i)
             ln = self.emu.r32(lengths + 4 * i) if lengths else 0xffffffff
             if ln & 0x80000000:
-                parts.append(self.emu.cstr(sp).encode() if hasattr(self.emu, 'cstr') else b'')
+                parts.append(self.emu.cstr(sp, limit=1 << 20).encode())    # shaders run past cstr's 4 KB default
             else:
                 parts.append(self.read(sp, ln))
         src = fix_shader(b''.join(parts))

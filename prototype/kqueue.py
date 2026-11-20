@@ -178,7 +178,7 @@ def install(Kernel):
             err = kq.change(ident, filt, flags, fflags, data, udata, ext)
             if err or flags & EV_RECEIPT:
                 errors.append((ident, filt, flags | EV_ERROR, 0, err, udata, ext))
-            if self.emu.trace:
+            if self.emu.trace or self.emu.trace_sys:
                 print(f'[kq] {kq_fd}: filter {filt} ident {ident:#x} flags {flags:#x} fflags {fflags:#x} data {data} -> {err}')
 
         def write_out(evs):

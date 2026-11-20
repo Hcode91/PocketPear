@@ -248,6 +248,12 @@ class Emulator:
         from gles import GLES
         self.gles = GLES(self)
         self.gles.install(self.stubs, gl_syms)
+        self.preset_screen()
+        from displaylink import DisplayLinks
+        self.objc_msgsend = next(a for a, n in zip(self.syms.addrs, self.syms.names) if n.startswith('_objc_msgSend (libobjc'))
+        self.displaylinks = DisplayLinks(self)
+        if not os.environ.get('PP_NO_DISPLAYLINK'):
+            self.displaylinks.install(self.stubs)
         print(f'[emu] {len(self.syms.addrs)} symbols')
 
         # commpage
@@ -312,6 +318,39 @@ class Emulator:
             self.uc.hook_add(UC_HOOK_CODE, self.on_break, begin=a, end=a)
         print(f'[emu] exe {exe_host} at {exe_mh:#x}, dyld entry {dyld.entry:#x}, sp {sp:#x}')
 
+    def preset_screen(self):
+        """GraphicsServices caches the main screen's pixel size, scale and orientation, filling
+        them from MobileGestalt capabilities on first use. Fill the cache with an iPhone 5's
+        (640x1136 pixels at 2x, portrait) so UIScreen, and every game that sizes its view from it,
+        sees the right screen. The addresses are the iOS 6.1.4 (10B350) GraphicsServices' own."""
+        pixels, scale = 0x3A31D450, 0x3A31EE6C
+        try:
+            if self.syms.name(0x34c97c88).startswith('_GSMainScreenPixelSize'):
+                self.write(pixels, struct.pack('<ii', 640, 1136))
+                self.write(scale, struct.pack('<fi', 2.0, 0))
+                print('[emu] main screen 640x1136 at 2x')
+        except Exception as e:
+            print('[emu] could not preset the screen size:', e)
+        # UIScreen takes its metrics from CADisplay, which has no display list without a
+        # render server. Keep its _bounds (ivar at +8) and _scale (+24) at the iPhone 5's
+        # whenever they are read; -[UIScreen bounds] and friends only read those ivars.
+        names = dict(zip(self.syms.names, self.syms.addrs))
+        rect_methods = {names.get(m + ' (UIKit)') for m in (
+            '-[UIScreen bounds]', '-[UIScreen _boundsInPixels]', '-[UIScreen _realDisplayBounds]',
+            '-[UIScreen applicationFrame]', '-[UIScreen _applicationFrameForInterfaceOrientation:]')}
+
+        def fix(uc, address, size, data):
+            # methods returning a CGRect take the result pointer in r0 and self in r1
+            obj = uc.reg_read(UC_ARM_REG_R1 if address in rect_methods else UC_ARM_REG_R0)
+            if obj:
+                self.write(obj + 8, struct.pack('<fffff', 0.0, 0.0, 320.0, 568.0, 2.0))
+        for m in ('-[UIScreen bounds]', '-[UIScreen scale]', '-[UIScreen _scale]', '-[UIScreen _boundsInPixels]',
+                  '-[UIScreen _realDisplayBounds]', '-[UIScreen applicationFrame]',
+                  '-[UIScreen _applicationFrameForInterfaceOrientation:]', '-[UIScreen currentMode]'):
+            a = names.get(m + ' (UIKit)')
+            if a is not None:
+                self.uc.hook_add(UC_HOOK_CODE, fix, begin=a, end=a)
+
     def on_unmapped(self, uc, access, address, size, value, data):
         pc = uc.reg_read(UC_ARM_REG_PC)
         print(f'[emu] unmapped access type {access} at {address:#x} (size {size}) pc={self.syms.name(pc)} lr={self.syms.name(uc.reg_read(UC_ARM_REG_LR))}')
@@ -321,9 +360,16 @@ class Emulator:
     def on_break(self, uc, address, size, data):
         r = [uc.reg_read(UC_ARM_REG_R0 + i) for i in range(13)]
         print(f'[break] {self.syms.name(address)} ' + ' '.join(f'r{i}={v:#x}' for i, v in enumerate(r[:8])) + f' lr={self.syms.name(uc.reg_read(UC_ARM_REG_LR))}')
+        if os.environ.get('BREAK_TRACE'):
+            self.trace_sys = True
+        if os.environ.get('BREAK_BT'):
+            self._btn = getattr(self, '_btn', 0) + 1
+            if self._btn % int(os.environ['BREAK_BT']) == 0:
+                self.backtrace(16)
         for d in filter(None, os.environ.get('BREAK_DUMP', '').split(',')):
-            a = int(d, 16)
-            print(f'        [{a:#x}]', [hex(self.r32(a + 4 * i)) for i in range(4)])
+            a, _, n = d.partition(':')
+            a, n = int(a, 16), int(n or 4)
+            print(f'        [{a:#x}]', [hex(self.r32(a + 4 * i)) for i in range(n)])
         if os.environ.get('BREAK_CFSTR'):
             for i in range(3):
                 print(f'        r{i}: {self.cfstring(r[i])!r}')
@@ -427,7 +473,10 @@ class Emulator:
         last_beat = t0
         executed = 0
         while self.kernel.exited is None:
+            self.displaylinks.deliver()
             t, state = self.sched.pick()
+            if t is None and state == 'external':
+                continue
             if t is None:
                 print('[emu] every thread is blocked for ever:')
                 for th in self.sched.threads:
@@ -469,6 +518,11 @@ class Emulator:
                 for th in self.sched.threads:
                     if not th.dead:
                         print(f'      {th} at {self.syms.name(getattr(th, "pc", 0))}')
+                        if os.environ.get('PP_BT_THREADS') and th.ctx is not None and th is not t:
+                            self.uc.context_restore(th.ctx)
+                            self.backtrace(int(os.environ['PP_BT_THREADS']))
+                if os.environ.get('PP_BT_THREADS'):
+                    self.uc.context_restore(t.ctx)
             from sched import CLOCK
             CLOCK.tick(0.0005)
             executed += slice_insns

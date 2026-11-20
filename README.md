@@ -21,8 +21,13 @@ The app's data container (Documents, Library, tmp) is kept per app under `~/.poc
 `PP_REALTIME=1` to follow the host clock instead.
 
 Debugging switches: `TRACE=1` (file system calls), `TRACE_SYS=1` (every call with its result),
-`BREAK=addr,...` (`BREAK_CFSTR`, `BREAK_OBJ`, `BREAK_DUMP=addr,...` say what to print there),
-`WATCH=addr` (writes to 8 bytes, by guest code or by the kernel), `TRACK_CF=1`.
+`BREAK=addr,...` (`BREAK_CFSTR`, `BREAK_OBJ`, `BREAK_DUMP=addr[:words],...` say what to print
+there, `BREAK_BT=n` prints a backtrace every nth hit, `BREAK_TRACE=1` turns on `TRACE_SYS` from
+the first hit), `WATCH=addr` (writes to 8 bytes, by guest code or by the kernel), `TRACK_CF=1`,
+`PP_TRACE_FROM=n` (trace from the nth call), `PP_HEARTBEAT=s` with `PP_BT_THREADS=frames`
+(every thread's state and backtrace every s seconds), `BT_REQTHREADS=1` (who asks libdispatch
+for worker threads). Frames are saved as PNGs to `PP_FRAMES` (default `/tmp/pocketpear-frames`)
+every `PP_FRAME_EVERY` presents.
 
 ## Where it has got to
 
@@ -31,8 +36,15 @@ libdispatch, Foundation and the app's initialisers run, `UIApplicationMain` chec
 the backboard stand-in sends the GraphicsServices application-launch event (type 2000), UIKit
 registers a render context with the CARenderServer stand-in, the app delegate's
 `applicationDidFinishLaunching` runs, preferences are saved in the container, and the game's
-Mono runtime loads `mscorlib` and the game's assemblies; it stops at "gfx device initialization failed", i.e. OpenGL ES. Core Animation commits arrive at the render server
-stand-in but are not drawn yet.
+Mono runtime loads `mscorlib` and the game's assemblies, OpenGL ES runs on the host GPU, and the
+game draws its studio logos, title screen and menu backdrop full-screen (1136x640) at 60 frames a
+second of guest time. Core Animation commits arrive at the render server stand-in but are not
+drawn (Unity draws everything itself). No touch input or sound yet.
+
+`CADisplayLink` is replaced (`prototype/displaylink.py`): without a display server there is no
+vsync, so each tick borrows the main thread while its run loop waits in `mach_msg`, calls the
+target, and puts the wait back. UIScreen and GraphicsServices are given an iPhone 5's screen
+(640x1136 at 2x).
 
 pthread mutexes, condition variables and rwlocks are implemented at the libsystem_c function
 level (`prototype/hle.py`) rather than through the kernel's psynch calls. Threads switch only at

@@ -111,6 +111,10 @@ class Scheduler:
                     self.rr = (self.rr + i + 1) % n
                     return t, state
             deadlines = [t.deadline for t in self.threads if not t.dead and t.ready and t.deadline is not None]
+            ext = self.emu.displaylinks.next_due() if hasattr(self.emu, 'displaylinks') else None
+            if ext is not None and (not deadlines or ext <= min(deadlines)):
+                CLOCK.advance_to(ext)          # a display link tick is next: the run loop delivers it
+                return None, 'external'
             if not deadlines:
                 return None, None
             CLOCK.advance_to(min(deadlines))

@@ -42,7 +42,7 @@ class Port:
         self.kind = kind          # 'receive', 'set', or a kernel object kind
         self.queue = []           # received messages: (bytes, ool list)
         self.members = set()      # for a set
-        self.in_set = None
+        self.sets = set()         # port sets this port belongs to (a port may be in several)
         self.context = 0
         self.value = 0            # semaphore count
         self.dead = False
@@ -76,14 +76,29 @@ class Ports:
 
     # ------------------------------------------------------------ sets
     def move_member(self, member, set_name):
+        """mach_port_move_member: leave every set, then join set_name (0 = none)."""
         p = self.by_name.get(member)
         if not p:
             return
-        if p.in_set is not None and p.in_set in self.by_name:
-            self.by_name[p.in_set].members.discard(member)
-        p.in_set = set_name or None
-        if set_name and set_name in self.by_name:
-            self.by_name[set_name].members.add(member)
+        for old in list(p.sets):
+            self.extract_member(member, old)
+        if set_name:
+            self.insert_member(member, set_name)
+
+    def insert_member(self, member, set_name):
+        """mach_port_insert_member: join one more set. CFRunLoop puts its wake-up port in the
+        port set of every mode, so membership in several sets is the normal case."""
+        p, ps = self.by_name.get(member), self.by_name.get(set_name)
+        if p and ps:
+            p.sets.add(set_name)
+            ps.members.add(member)
+
+    def extract_member(self, member, set_name):
+        p, ps = self.by_name.get(member), self.by_name.get(set_name)
+        if p:
+            p.sets.discard(set_name)
+        if ps:
+            ps.members.discard(member)
 
     def fire_timer(self, p):
         """An armed mk_timer whose time has come queues its expiry message."""
