@@ -20,25 +20,47 @@ EPERM = 1
 # Darwin open() flags
 O_ACCMODE, O_CREAT, O_TRUNC, O_EXCL, O_APPEND, O_NONBLOCK = 3, 0x200, 0x400, 0x800, 0x8, 0x4
 
-BSD_NAMES = {1: 'exit', 3: 'read', 4: 'write', 5: 'open', 6: 'close', 20: 'getpid', 24: 'getuid', 25: 'geteuid',
-             33: 'access', 43: 'getegid', 46: 'sigaction', 47: 'getgid', 48: 'sigprocmask', 54: 'ioctl', 73: 'munmap',
-             74: 'mprotect', 75: 'madvise', 92: 'fcntl', 116: 'gettimeofday', 153: 'pread', 188: 'stat', 189: 'fstat',
-             190: 'lstat', 194: 'getrlimit', 195: 'setrlimit', 197: 'mmap', 199: 'lseek', 202: 'sysctl', 294: 'shared_region_check_np',
-             295: 'shared_region_map_np', 327: 'issetugid', 336: 'proc_info', 338: 'stat64', 339: 'fstat64', 340: 'lstat64',
-             344: 'getdirentries64', 360: 'bsdthread_create', 366: 'bsdthread_register', 372: 'thread_selfid', 381: 'sandbox_ms',
-             301: 'psynch_mutexwait', 302: 'psynch_mutexdrop', 303: 'psynch_cvbroad', 304: 'psynch_cvsignal', 305: 'psynch_cvwait',
-             286: 'pthread_sigmask', 329: '__pthread_kill', 330: '__pthread_sigmask', 331: '__sigwait', 332: '__disable_threadsignal',
-             333: '__pthread_markcancel', 334: '__pthread_canceled', 362: 'kqueue', 363: 'kevent', 357: 'getaudit_addr',
-             340: 'lstat64', 396: 'read_nocancel', 397: 'write_nocancel', 398: 'open_nocancel', 399: 'close_nocancel',
-             406: 'fcntl_nocancel', 159: 'unmount', 93: 'select', 97: 'socket', 98: 'connect', 137: 'rmdir', 136: 'mkdir',
-             10: 'unlink', 128: 'rename', 58: 'readlink', 101: '__sysctl?', 220: 'getattrlist', 37: 'kill', 39: 'getppid',
-             50: 'getlogin', 60: 'umask', 147: 'setsid', 169: 'csops', 323: 'getsgroups?', 274: 'sysctlbyname', 371: 'thread_selfid?'}
+# sysctlbyname: names with a fixed MIB, and others answered from NAMED_SYSCTL
+SYSCTL_MIBS = {'kern.ostype': [1, 1], 'kern.osrelease': [1, 2], 'kern.version': [1, 4], 'kern.hostname': [1, 10],
+               'kern.argmax': [1, 8], 'kern.osversion': [1, 65], 'kern.usrstack': [1, 35],
+               'hw.machine': [6, 1], 'hw.model': [6, 2], 'hw.ncpu': [6, 3], 'hw.pagesize': [6, 7],
+               'hw.physmem': [6, 5], 'hw.memsize': [6, 24], 'hw.availcpu': [6, 25], 'hw.cpufrequency': [6, 15],
+               'hw.busfrequency': [6, 14], 'hw.cachelinesize': [6, 16]}
+NAMED_MIB = 0x7770
+NAMED_SYSCTL = {n: struct.pack('<i', v) if isinstance(v, int) else v for n, v in {
+    'hw.physicalcpu': 2, 'hw.physicalcpu_max': 2, 'hw.logicalcpu': 2, 'hw.logicalcpu_max': 2, 'hw.activecpu': 2,
+    'hw.cputype': 12, 'hw.cpusubtype': 11, 'hw.cpufamily': 0x1e2d6381, 'hw.cpu64bit_capable': 0,
+    'hw.optional.neon': 1, 'hw.optional.neon_hpfp': 1, 'hw.optional.vfp': 1, 'hw.optional.armv7s': 1,
+    'hw.l1icachesize': 32768, 'hw.l1dcachesize': 32768, 'hw.l2cachesize': 1048576,
+    'hw.cpufrequency_max': 1300000000, 'hw.tbfrequency': 24000000, 'kern.maxfilesperproc': 10240,
+    'kern.hv_vmm_present': 0, 'kern.secure_kernel': 1, 'security.mac.sandbox.sentinel': b'.sb-0\0',
+    'kern.bootsessionuuid': b'00000000-0000-0000-0000-000000000000\0', 'hw.target': b'N42AP\0',
+}.items()}
+
+# Linux errno values that differ from Darwin's
+DARWIN_ERRNO = {errno.ELOOP: 62, errno.ENAMETOOLONG: 63, errno.ENOTEMPTY: 66, errno.ENOSYS: 78,
+                errno.EAGAIN: 35, errno.EINPROGRESS: 36, errno.EALREADY: 37, errno.ENOTSUP: 45,
+                errno.ETIMEDOUT: 60, errno.ECONNREFUSED: 61}
+
+import json as _json
+# Numbers and names come from libsystem_kernel's own stubs (bsdnums.json, made by
+# tools/sysnums.py); the entries below only rename calls whose iOS 6 stub is the 64-bit-inode
+# variant, or add numbers whose stubs that tool does not recognise.
+BSD_NAMES = {int(k): v for k, v in _json.load(open(os.path.join(os.path.dirname(__file__), 'bsdnums.json'))).items()}
+BSD_NAMES.update({20: 'getpid', 188: 'stat', 189: 'fstat', 190: 'lstat', 338: 'stat64', 339: 'fstat64', 340: 'lstat64',
+                  93: 'select', 197: 'mmap', 202: 'sysctl', 220: 'getattrlist', 221: 'setattrlist', 153: 'pread',
+                  154: 'pwrite', 295: 'shared_region_map_np', 301: 'psynch_mutexwait', 302: 'psynch_mutexdrop',
+                  303: 'psynch_cvbroad', 304: 'psynch_cvsignal', 305: 'psynch_cvwait', 306: 'psynch_rw_rdlock',
+                  307: 'psynch_rw_wrlock', 308: 'psynch_rw_unlock', 309: 'psynch_rw_unlock2', 312: 'psynch_cvclrprepost',
+                  336: 'proc_info', 360: 'bsdthread_create', 363: 'kevent', 366: 'bsdthread_register', 369: 'kevent64',
+                  371: 'thread_selfid', 370: '__old_semwait_signal', 334: '__semwait_signal', 423: '__semwait_signal_nocancel'})
 
 MACH_NAMES = {3: 'mach_absolute_time', 10: 'mach_vm_allocate', 12: 'mach_vm_deallocate', 14: 'mach_vm_protect',
               16: 'mach_port_allocate', 17: 'mach_port_destroy', 18: 'mach_port_deallocate', 19: 'mach_port_mod_refs',
               20: 'mach_port_move_member', 21: 'mach_port_insert_right', 22: 'mach_port_insert_member',
               23: 'mach_port_extract_member', 26: 'mach_reply_port', 27: 'thread_self', 28: 'task_self', 29: 'host_self',
-              31: 'mach_msg', 32: 'mach_msg_overwrite', 33: 'semaphore_signal', 36: 'semaphore_wait', 89: 'mach_timebase_info',
+              31: 'mach_msg', 32: 'mach_msg_overwrite', 33: 'semaphore_signal', 34: 'semaphore_signal_all', 36: 'semaphore_wait',
+              37: 'semaphore_wait_signal', 38: 'semaphore_timedwait', 39: 'semaphore_timedwait_signal', 89: 'mach_timebase_info',
               90: 'mach_wait_until', 91: 'mk_timer_create', 93: 'mk_timer_arm', 94: 'mk_timer_cancel', 58: 'pid_for_task',
               59: 'macx_swapon?', 61: 'thread_switch', 62: 'clock_sleep', 24: 'mach_port_construct?'}
 
@@ -51,21 +73,26 @@ class Kernel:
         self.exited = None
         self.unimplemented = {}
         self.t0 = time.monotonic()
-        self.ports = {}            # name -> description
-        self.next_port = 0x103
+        from ports import Ports
+        self.pr = Ports(self)
         self.task_port = self.new_port('task')
         self.thread_port = self.new_port('thread')
         self.host_port = self.new_port('host')
         self.calls = 0
         self.semaphores = {}
+        import kqueue
+        kqueue.install(Kernel)
+        from bootstrap import Bootstrap
+        self.bootstrap = Bootstrap(self)
         from mach import MachMsg
         self.mach = MachMsg(self)
 
-    def new_port(self, what):
-        p = self.next_port
-        self.next_port += 0x100
-        self.ports[p] = what
-        return p
+    def new_port(self, kind):
+        return self.pr.new(kind)
+
+    @property
+    def cur(self):
+        return self.emu.sched.cur
 
     # ------------------------------------------------------------ plumbing
     def reg(self, n): return self.uc.reg_read(UC_ARM_REG_R0 + n) if n < 13 else None
@@ -100,6 +127,8 @@ class Kernel:
         if num & 0x80000000:
             num -= 1 << 32
         self.calls += 1
+        if self.emu.trace_sys:
+            self._last = (num, [hex(a) for a in self.args(4)])
         try:
             if num > 0:
                 self.bsd(num)
@@ -107,6 +136,11 @@ class Kernel:
                 self.mach_trap(-num)
             else:
                 self.indirect()
+            if self.emu.trace_sys:
+                n = self._last[0]
+                nm = BSD_NAMES.get(n, '') if n > 0 else MACH_NAMES.get(-n, '')
+                err = ' ERR' if n > 0 and uc.reg_read(UC_ARM_REG_CPSR) & CARRY else ''
+                print(f'[sys] t{self.cur.tid} {n} {nm}{self._last[1]} -> {uc.reg_read(UC_ARM_REG_R0):#x}{err}')
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -156,14 +190,11 @@ class Kernel:
             self.unimpl('bsd', num, name)
             self.ret(ENOSYS, True)
             return
-        h()
-
-    def sys_kill(self):
-        pid, sig = self.args(2)
-        print(f'[kernel] kill({pid}, {sig}) - the guest aborted')
-        self.emu.backtrace()
-        self.exited = 128 + sig
-        self.uc.emu_stop()
+        try:
+            h()
+        except OSError as e:
+            self.log(f'{name}: host error {e}')
+            self.ret(DARWIN_ERRNO.get(e.errno, e.errno), True)
 
     def sys_exit(self):
         self.exited = self.args(1)[0]
@@ -178,7 +209,7 @@ class Kernel:
     def sys_getegid(self): self.ret(501)
     def sys_issetugid(self): self.ret(0)
     def sys_umask(self): self.ret(0o22)
-    def sys_thread_selfid(self): self.ret(1)
+    def sys_thread_selfid(self): self.ret(self.cur.tid, value_hi=0)
     def sys_csops(self): self.ret(0)
 
     def sys_sigaction(self): self.ret(0)
@@ -187,16 +218,151 @@ class Kernel:
         if oset_p:
             self.emu.w32(oset_p, 0)
         self.ret(0)
-    sys___pthread_sigmask = sys_sigprocmask
     sys_pthread_sigmask = sys_sigprocmask
-    def sys___disable_threadsignal(self): self.ret(0)
-    def sys_bsdthread_register(self):
-        self.thread_start, self.wq_start = self.args(2)
+
+    def sys_gettid(self):
+        uid_p, gid_p = self.args(2)
+        self.emu.w32(uid_p, 501)
+        self.emu.w32(gid_p, 501)
         self.ret(0)
+    sys_pthread_sigmask = sys_sigprocmask
+    def sys_disable_threadsignal(self): self.ret(0)
+    def sys_bsdthread_register(self):
+        self.thread_start, self.wq_start, self.pthsize = self.args(3)
+        self.ret(0)
+
+    def start_thread(self, name, pc, regs, sp):
+        """A new guest thread whose first instruction is pc, with r0.. set from regs."""
+        from sched import Thread
+        saved = self.uc.context_save()
+        for i, v in enumerate(regs):
+            self.uc.reg_write((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+                               UC_ARM_REG_R4, UC_ARM_REG_R5)[i], v & 0xffffffff)
+        self.uc.reg_write(UC_ARM_REG_SP, sp)
+        self.uc.reg_write(UC_ARM_REG_LR, 0)
+        self.uc.reg_write(UC_ARM_REG_PC, pc & ~1)
+        cpsr = self.uc.reg_read(UC_ARM_REG_CPSR)
+        self.uc.reg_write(UC_ARM_REG_CPSR, (cpsr | 0x20) if pc & 1 else (cpsr & ~0x20))
+        t = Thread(self.uc.context_save(), name, self.new_port('thread'))
+        self.uc.context_restore(saved)
+        self.emu.sched.add(t)
+        return t
+
+    def sys_bsdthread_create(self):
+        func, arg, stack, pthread, flags = self.args(5)
+        PTHREAD_START_CUSTOM = 0x01000000
+        if flags & PTHREAD_START_CUSTOM:
+            th_stack, th_pthread = stack, pthread
+        else:
+            size = stack
+            total = size + 0x1000 + ((self.pthsize + 0xfff) & ~0xfff)
+            base = self.emu.find_free(total)
+            self.emu.map(base, total)
+            self.emu.write(base, bytes(total))
+            th_stack = base + 0x1000 + size
+            th_pthread = th_stack
+        t = self.start_thread(f'pthread {func:#x}', self.thread_start,
+                              [th_pthread, 0, func, arg, stack, flags], th_stack)
+        t.pthread = th_pthread
+        # the thread port goes in r1 once it exists
+        saved = self.uc.context_save()
+        self.uc.context_restore(t.ctx)
+        self.uc.reg_write(UC_ARM_REG_R1, t.port)
+        t.ctx = self.uc.context_save()
+        self.uc.context_restore(saved)
+        print(f'[kernel] thread {t.tid} created: start {self.emu.syms.name(func)}, flags {flags:#x}')
+        self.ret(th_pthread)
+
+    def sys_bsdthread_terminate(self):
+        stack, size, port, sem = self.args(4)
+        if sem:
+            self.sem(sem).value += 1
+        self.cur.dead = True
+        print(f'[kernel] thread {self.cur.tid} ended')
+        self.uc.emu_stop()
+
+    def sys_psynch_mutexwait(self):
+        m, mgen, ugen, tid, flags = self.args(5)
+        print(f'[psynch] thread {self.cur.tid} waits on mutex {m:#x} mgen={mgen:#x} ugen={ugen:#x} owner={tid} flags={flags:#x}')
+        print('   words', [hex(self.emu.r32(m + 4 * i)) for i in range(16)])
+        self.emu.backtrace()
+        self.exited = -2
+        self.uc.emu_stop()
+
+    def sys_pthread_kill(self):
+        port, sig = self.args(2)
+        print(f'[kernel] signal {sig} sent to thread port {port:#x} by thread {self.cur.tid}')
+        if sig == 0:
+            self.ret(0); return
+        if sig in (6, 9, 10, 11):
+            self.emu.backtrace(40)
+            self.exited = 128 + sig
+            self.uc.emu_stop()
+            return
+        self.ret(0)
+
+    def sys_kill(self):
+        pid, sig = self.args(2)
+        if pid in (0, 1234) and sig in (6, 9):
+            print(f'[kernel] process killed itself with signal {sig}')
+            self.emu.backtrace(40)
+            self.exited = 128 + sig
+            self.uc.emu_stop()
+            return
+        self.ret(0)
+
+    def sys_workq_open(self):
+        self.ret(0)
+
+    WQ_STACK, WQ_GUARD = 512 * 1024, 0x1000
+
+    def wq_thread(self, item, flags):
+        total = self.WQ_GUARD + self.WQ_STACK + ((self.pthsize + 0xfff) & ~0xfff)
+        base = self.emu.find_free(total)
+        self.emu.map(base, total)
+        self.emu.write(base, bytes(total))
+        self_p = base + self.WQ_GUARD + self.WQ_STACK
+        t = self.start_thread(f'workq {item:#x}', self.wq_start, [self_p, 0, base + self.WQ_GUARD, item, flags], self_p - 16)
+        saved = self.uc.context_save()
+        self.uc.context_restore(t.ctx)
+        self.uc.reg_write(UC_ARM_REG_R1, t.port)
+        t.ctx = self.uc.context_save()
+        self.uc.context_restore(saved)
+        t.pthread = self_p
+        return t
+
+    def workq_op(self, op, item, affinity, prio):
+        if op == 1:                       # WQOPS_QUEUE_ADD: run the item on a new worker
+            t = self.wq_thread(item, prio & 0xffff)
+            print(f'[kernel] workq thread {t.tid} for item {item:#x}')
+            self.ret(0)
+        elif op == 2:                     # WQOPS_QUEUE_REMOVE
+            self.ret(0)
+        elif op == 4:                     # WQOPS_THREAD_RETURN: the worker parks; we end it
+            self.cur.dead = True
+            self.uc.emu_stop()
+        elif op == 8:                     # WQOPS_THREAD_SETCONC
+            self.ret(0)
+        elif op == 0x10:                  # WQOPS_QUEUE_NEWSPISUPP: yes, libdispatch requires it
+            self.ret(0)
+        elif op == 0x20:                  # WQOPS_QUEUE_REQTHREADS: affinity = how many, prio = priority | overcommit
+            for _ in range(max(1, affinity)):
+                t = self.wq_thread(0, 0x40000 | (prio & 0x1ffff))
+                print(f'[kernel] workq thread {t.tid} (priority {prio & 0xffff}{", overcommit" if prio & 0x10000 else ""})')
+            self.ret(0)
+        else:
+            self.ret(45, True)            # ENOTSUP
+
+    def sys_workq_kernreturn(self):
+        op, item, affinity, prio = self.args(4)
+        print(f'[kernel] workq_kernreturn op={op:#x} item={item:#x} affinity={affinity} prio={prio}')
+        self.workq_op(op, item, affinity, prio)
 
     def sys_gettimeofday(self):
         tv, tz = self.args(2)
-        now = time.time()
+        from sched import CLOCK
+        CLOCK.nudge()
+        now = CLOCK.wall()
         if tv:
             self.emu.write(tv, struct.pack('<ii', int(now), int((now % 1) * 1e6)))
         # libsystem's gettimeofday stub returns seconds/usecs in r0/r1 as well
@@ -247,12 +413,13 @@ class Kernel:
 
     def hostfd(self, gfd):
         e = self.fds.get(gfd)
-        return e[0] if e else None
+        return e[0] if isinstance(e, tuple) else None
 
     def sys_close(self):
         gfd, = self.args(1)
         e = self.fds.pop(gfd, None)
-        if e:
+        getattr(self, 'dirs', {}).pop(gfd, None)
+        if isinstance(e, tuple):
             os.close(e[0])
         self.ret(0)
     sys_close_nocancel = sys_close
@@ -294,10 +461,49 @@ class Kernel:
         self.ret(os.write(fd, data))
     sys_write_nocancel = sys_write
 
+    def write_bytes(self, gfd, data):
+        if gfd in (1, 2):
+            text = data.decode('utf-8', 'replace')
+            for line in text.rstrip('\n').split('\n'):
+                print(f'[guest {"out" if gfd == 1 else "err"}] {line}')
+            return len(data)
+        fd = self.hostfd(gfd)
+        if fd is None:
+            return None
+        return os.write(fd, data)
+
+    def sys_writev(self):
+        gfd, iov, cnt = self.args(3)
+        data = b''.join(self.emu.read(self.emu.r32(iov + 8 * i), self.emu.r32(iov + 8 * i + 4)) for i in range(cnt))
+        n = self.write_bytes(gfd, data)
+        if n is None:
+            self.ret(EBADF, True)
+        else:
+            self.ret(n)
+    sys_writev_nocancel = sys_writev
+
+    def sys_readv(self):
+        gfd, iov, cnt = self.args(3)
+        fd = self.hostfd(gfd)
+        if fd is None:
+            self.ret(EBADF, True); return
+        total = 0
+        for i in range(cnt):
+            base, ln = self.emu.r32(iov + 8 * i), self.emu.r32(iov + 8 * i + 4)
+            data = os.read(fd, ln)
+            self.emu.write(base, data)
+            total += len(data)
+            if len(data) < ln:
+                break
+        self.ret(total)
+    sys_readv_nocancel = sys_readv
+
     def sys_lseek(self):
         gfd = self.args(1)[0]
         off = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)
-        whence = self.uc.reg_read(UC_ARM_REG_R4)
+        # off_t takes the even pair r2:r3 (AAPCS), so whence is on the caller's stack: the
+        # kernel copies arguments past r3 from there when the stub loads none into r4-r6.
+        whence = self.emu.r32(self.uc.reg_read(UC_ARM_REG_SP))
         fd = self.hostfd(gfd)
         if fd is None:
             self.ret(EBADF, True); return
@@ -428,6 +634,19 @@ class Kernel:
     def sys_sysctl(self):
         name_p, namelen, old_p, oldlen_p, new_p, newlen = self.args(6)
         mib = [self.emu.r32(name_p + 4 * i) for i in range(namelen)]
+        if mib[:2] == [0, 3]:               # sysctl.name2mib: newp holds the name
+            name = self.emu.read(new_p, newlen).split(b'\0')[0].decode()
+            known = SYSCTL_MIBS.get(name)
+            if known is None and name in NAMED_SYSCTL:
+                known = [NAMED_MIB, list(NAMED_SYSCTL).index(name)]
+            if known is None:
+                self.unimpl('sysctl name', 0, name)
+                self.ret(ENOENT, True); return
+            avail = self.emu.r32(oldlen_p) // 4
+            for i, v in enumerate(known[:avail]):
+                self.emu.w32(old_p + 4 * i, v)
+            self.emu.w32(oldlen_p, 4 * len(known))
+            self.ret(0); return
         val = self.sysctl_value(mib)
         if val is None:
             self.unimpl('sysctl', tuple(mib), 'sysctl')
@@ -453,16 +672,92 @@ class Kernel:
             (1, 21): i32(1), (1, 38): i32(1),
             (1, 65): i32(0),
         }
+        table[(1, 65)] = s('10B350')        # kern.osversion: the build
+        table[(1, 35)] = i32(0x2f000000)     # kern.usrstack
         key = tuple(mib[:2])
         if key in table:
             return table[key]
-        if mib[:2] == [0, 3]:
-            return None       # name2mib, handled by sysctlbyname path later
+        if mib[0] == NAMED_MIB:
+            return NAMED_SYSCTL[list(NAMED_SYSCTL)[mib[1]]]
         return None
 
-    def sys_proc_info(self): self.ret(EINVAL, True)
-    def sys_kqueue(self):
-        self.ret(EINVAL, True)
+    # ------------------------------------------------------------ file systems and directories
+    def statfs_bytes(self):
+        st = os.statvfs('/')
+        name = b'hfs'
+        return struct.pack('<IiQQQQQiiIIII16s1024s1024s32s', 4096, 1 << 20, st.f_blocks, st.f_bfree, st.f_bavail,
+                           st.f_files, st.f_ffree, 0x1000001, 0x1000001, 501, 0x11, 0x1000, 0, name,
+                           b'/private/var', b'/dev/disk0s1s2', b'')
+
+    def sys_fstatfs(self):
+        gfd, buf = self.args(2)
+        self.emu.write(buf, self.statfs_bytes())
+        self.ret(0)
+
+    def sys_statfs(self):
+        path_p, buf = self.args(2)
+        if not os.path.exists(self.emu.host_path(self.guest_path(path_p))):
+            self.ret(ENOENT, True); return
+        self.emu.write(buf, self.statfs_bytes())
+        self.ret(0)
+
+    def sys_getdirentries64(self):
+        gfd, buf, size, basep = self.args(4)
+        e = self.fds.get(gfd)
+        if not isinstance(e, tuple):
+            self.ret(EBADF, True); return
+        if not hasattr(self, 'dirs'):
+            self.dirs = {}
+        host = self.emu.host_path(e[1])
+        if gfd not in self.dirs:
+            try:
+                names = ['.', '..'] + sorted(os.listdir(host))
+            except OSError as err:
+                self.ret(err.errno, True); return
+            self.dirs[gfd] = [names, 0]
+        names, pos = self.dirs[gfd]
+        out = bytearray()
+        while pos < len(names):
+            n = names[pos].encode()
+            reclen = (21 + len(n) + 1 + 3) & ~3
+            if len(out) + reclen > size:
+                break
+            full = os.path.join(host, names[pos])
+            try:
+                st = os.lstat(full)
+                ino, mode = st.st_ino, st.st_mode
+            except OSError:
+                ino, mode = pos + 2, 0o100644
+            dtype = 4 if pystat.S_ISDIR(mode) else 10 if pystat.S_ISLNK(mode) else 8
+            rec = struct.pack('<QQHHB', ino, pos + 1, reclen, len(n), dtype) + n + b'\0'
+            out += rec + bytes(reclen - len(rec))
+            pos += 1
+        self.dirs[gfd][1] = pos
+        self.emu.write(buf, out)
+        if basep:
+            self.emu.write(basep, struct.pack('<Q', pos))
+        self.log(f'getdirentries64({e[1]!r}) -> {len(out)} bytes')
+        self.ret(len(out))
+
+    def sys_proc_info(self):
+        call, pid, flavor, arg_lo, arg_hi, buf, size = self.args(7)
+        if call == 2 and flavor in (3, 13):      # PROC_PIDTBSDINFO / PROC_PIDT_SHORTBSDINFO
+            comm = os.path.basename(self.emu.app_guest).rsplit(".", 1)[0][:15].encode()
+            if flavor == 13:
+                b = struct.pack('<IIII16sIIIIIIII', 1234, 1, 1234, 2, comm, 0, 501, 501, 501, 501, 501, 501, 0)
+            else:
+                b = struct.pack('<IIIII16s32sIIIIIIIIIIQQ', 0, 2, 0, 1234, 1, 501, comm, comm, 0, 501, 501, 501, 501, 501, 501, 0, 1234, 0, int(self.t0), 0)
+            b = b[:size]
+            self.emu.write(buf, b)
+            self.ret(len(b))
+        elif call == 2 and flavor == 12:         # PROC_PIDWORKQUEUEINFO
+            n = sum(1 for t in self.emu.sched.threads if t.name.startswith('workq') and not t.dead)
+            b = struct.pack('<IIII', n, n, 0, 0)[:size]
+            self.emu.write(buf, b)
+            self.ret(len(b))
+        else:
+            print(f'[kernel] proc_info call {call} flavor {flavor} not answered')
+            self.ret(EINVAL, True)
 
     # ------------------------------------------------------------ Mach traps
     def mach_trap(self, num):
@@ -477,12 +772,14 @@ class Kernel:
     def mret(self, v): self.uc.reg_write(UC_ARM_REG_R0, v & 0xffffffff)
 
     def trap_task_self(self): self.mret(self.task_port)
-    def trap_thread_self(self): self.mret(self.thread_port)
+    def trap_thread_self(self): self.mret(self.cur.port)
     def trap_host_self(self): self.mret(self.host_port)
-    def trap_mach_reply_port(self): self.mret(self.new_port('reply'))
+    def trap_mach_reply_port(self): self.mret(self.new_port('receive'))
 
     def trap_mach_absolute_time(self):
-        t = int((time.monotonic() - self.t0) * 24_000_000)    # 24 MHz timebase
+        from sched import CLOCK
+        CLOCK.nudge()
+        t = int(CLOCK.now() * 24_000_000)    # 24 MHz timebase
         self.uc.reg_write(UC_ARM_REG_R0, t & 0xffffffff)
         self.uc.reg_write(UC_ARM_REG_R1, t >> 32)
 
@@ -515,38 +812,119 @@ class Kernel:
 
     def trap_mach_port_allocate(self):
         task, right, name_p = self.args(3)
-        self.emu.w32(name_p, self.new_port(f'right{right}'))
+        kind = {1: 'receive', 3: 'set', 4: 'dead'}.get(right, f'right{right}')
+        self.emu.w32(name_p, self.new_port(kind))
         self.mret(0)
 
     def trap_mach_port_deallocate(self): self.mret(0)
     def trap_mach_port_mod_refs(self): self.mret(0)
     def trap_mach_port_insert_right(self): self.mret(0)
     def trap_mach_port_destroy(self): self.mret(0)
-    def trap_mach_port_move_member(self): self.mret(0)
-    def trap_mach_port_insert_member(self): self.mret(0)
-    def trap_mach_port_extract_member(self): self.mret(0)
+    def trap_mach_port_move_member(self):
+        task, member, after = self.args(3)
+        self.pr.move_member(member, after)
+        self.mret(0)
+
+    def trap_mach_port_insert_member(self):
+        task, name, pset = self.args(3)
+        self.pr.move_member(name, pset)
+        self.mret(0)
+
+    def trap_mach_port_extract_member(self):
+        task, name, pset = self.args(3)
+        self.pr.move_member(name, 0)
+        self.mret(0)
     def trap_pid_for_task(self):
         t, p = self.args(2); self.emu.w32(p, 1234); self.mret(0)
     def trap_thread_switch(self): self.mret(0)
+    def sem(self, name):
+        p = self.pr.get(name)
+        if p is None:
+            p = self.pr.by_name.setdefault(name, __import__('ports').Port(name, 'semaphore'))
+        return p
+
     def trap_semaphore_signal(self):
-        p = self.args(1)[0]
-        self.semaphores[p] = self.semaphores.get(p, 0) + 1
+        self.sem(self.args(1)[0]).value += 1
         self.mret(0)
 
+    def trap_semaphore_signal_all(self):
+        p = self.sem(self.args(1)[0])
+        waiters = sum(1 for t in self.emu.sched.threads if t.ready and getattr(t, 'sem', None) is p)
+        p.value += waiters
+        self.mret(0)
+
+    def wait_on(self, p, timeout=None):
+        if p.value > 0:
+            p.value -= 1
+            self.mret(0)
+            return
+        if timeout == 0:
+            self.mret(49)          # KERN_OPERATION_TIMED_OUT
+            return
+        self.cur.sem = p
+        def complete(timed_out):
+            self.cur.sem = None
+            if timed_out:
+                self.mret(49)
+            else:
+                p.value -= 1
+                self.mret(0)
+        self.emu.sched.block(f'semaphore {p.name:#x}', lambda: p.value > 0, complete, timeout)
+
     def trap_semaphore_wait(self):
-        # Single-threaded for now: waiting on an empty semaphore would block for ever.
-        p = self.args(1)[0]
-        if self.semaphores.get(p, 0) > 0:
-            self.semaphores[p] -= 1
-            self.mret(0)
-        else:
-            print(f'[kernel] semaphore_wait on empty semaphore {p:#x} (would block)')
-            self.emu.backtrace()
-            self.mret(0)
+        self.wait_on(self.sem(self.args(1)[0]))
+
+    def trap_semaphore_wait_signal(self):
+        wait, signal = self.args(2)
+        self.sem(signal).value += 1
+        self.wait_on(self.sem(wait))
+
+    def trap_semaphore_timedwait(self):
+        name, sec, nsec = self.args(3)
+        self.wait_on(self.sem(name), sec + nsec / 1e9)
+
+    def trap_semaphore_timedwait_signal(self):
+        wait, signal, sec, nsec = self.args(4)
+        self.sem(signal).value += 1
+        self.wait_on(self.sem(wait), sec + nsec / 1e9)
+
     def trap_mk_timer_create(self): self.mret(self.new_port('timer'))
     def trap_mk_timer_arm(self): self.mret(0)
     def trap_mk_timer_cancel(self): self.mret(0)
 
     def trap_mach_msg(self):
-        self.mret(self.mach.msg(*self.args(7)))
+        from ports import MACH_SEND_MSG, MACH_RCV_MSG, MACH_RCV_TIMEOUT, MACH_RCV_TIMED_OUT, MACH_RCV_INVALID_NAME
+        msg, option, send_size, rcv_size, rcv_name, timeout, notify = self.args(7)
+        if option & MACH_SEND_MSG:
+            remote = self.emu.r32(msg + 8)
+            if self.pr.can_queue(remote):
+                self.pr.send(msg, send_size)
+                if self.emu.trace:
+                    print(f'[ipc] thread {self.cur.tid} sent id {self.emu.r32(msg + 20)} to {remote:#x}')
+                if not option & MACH_RCV_MSG:
+                    self.mret(0)
+                    return
+            else:
+                self.mret(self.mach.msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify))
+                return
+        if not option & MACH_RCV_MSG:
+            self.mret(0)
+            return
+        if self.pr.get(rcv_name) is None:
+            self.mret(MACH_RCV_INVALID_NAME)
+            return
+        ready = self.pr.pending(rcv_name)
+        if ready:
+            self.mret(self.pr.deliver(ready, msg, rcv_size, option))
+            return
+        limit = timeout / 1000 if option & MACH_RCV_TIMEOUT else None
+        if limit == 0:
+            self.mret(MACH_RCV_TIMED_OUT)
+            return
+        def complete(timed_out):
+            if timed_out:
+                self.mret(MACH_RCV_TIMED_OUT)
+            else:
+                self.mret(self.pr.deliver(self.pr.pending(rcv_name), msg, rcv_size, option))
+        self.emu.sched.block(f'mach_msg receive on {rcv_name:#x}', lambda: self.pr.pending(rcv_name) is not None, complete, limit)
     trap_mach_msg_overwrite = trap_mach_msg

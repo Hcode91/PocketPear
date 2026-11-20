@@ -46,14 +46,39 @@ class MachO:
             o += size
 
 
+WATCH_ADDR = int(os.environ['WATCH'], 16) if os.environ.get('WATCH') else None
+CONTAINER = '/var/mobile/Applications/00000000-0000-0000-0000-000000000001'
+
+
+def _random_file():
+    # A fixed stream of random bytes, so runs repeat; PP_REALTIME uses the host's.
+    if os.environ.get('PP_REALTIME'):
+        return '/dev/urandom'
+    p = '/tmp/pocketpear-random.bin'
+    if not os.path.exists(p):
+        import random
+        open(p, 'wb').write(random.Random(1).randbytes(1 << 20))
+    return p
+
+
+DEVICES = {'/dev/urandom': _random_file, '/dev/random': _random_file, '/dev/null': lambda: '/dev/null',
+           '/dev/zero': lambda: '/dev/zero'}
+
+
 class Emulator:
     def __init__(self, rootfs, app_dir):
         self.rootfs = rootfs
         self.app_dir = os.path.abspath(app_dir)
-        self.app_guest = '/var/mobile/Applications/00000000-0000-0000-0000-000000000001/' + os.path.basename(self.app_dir)
+        self.app_guest = CONTAINER + '/' + os.path.basename(self.app_dir)
+        # The app's data container: Documents, Library and tmp live on the host, per app.
+        name = os.path.basename(self.app_dir).rsplit('.', 1)[0]
+        self.container = os.path.join(os.environ.get('PP_DATA', os.path.expanduser('~/.pocketpear')), name)
+        for d in ('Documents', 'Library/Preferences', 'Library/Caches', 'tmp'):
+            os.makedirs(os.path.join(self.container, d), exist_ok=True)
         self.uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         self.mapped = []                      # (start, end) host bookkeeping for mmap
         self.next_mmap = 0x40000000           # anonymous mmap region search start
+        self.trace_sys = bool(os.environ.get('TRACE_SYS'))
         self.trace = os.environ.get('TRACE')
         from kernel import Kernel
         self.kernel = Kernel(self)
@@ -83,6 +108,9 @@ class Emulator:
 
     def unmap(self, start, size):
         start, end = align_down(start), align_up(start + size)
+        if os.environ.get('WATCH') and start <= int(os.environ['WATCH'], 16) < end:
+            print(f'[watch] unmap {start:#x}-{end:#x} lr={self.syms.name(self.uc.reg_read(UC_ARM_REG_LR))}')
+            self.backtrace(8)
         new = []
         for s, e in self.mapped:
             if e <= start or s >= end:
@@ -103,7 +131,12 @@ class Emulator:
         raise MemoryError('out of guest address space')
 
     def read(self, a, n): return bytes(self.uc.mem_read(a, n))
-    def write(self, a, b): self.uc.mem_write(a, bytes(b))
+    def write(self, a, b):
+        w = WATCH_ADDR
+        if w is not None and a <= w + 7 and w < a + len(b):
+            print(f'[watch] host write {a:#x}+{len(b):#x} lr={self.syms.name(self.uc.reg_read(UC_ARM_REG_LR))} pc={self.syms.name(self.uc.reg_read(UC_ARM_REG_PC))}')
+            self.backtrace(10)
+        self.uc.mem_write(a, bytes(b))
     def r32(self, a): return struct.unpack('<I', self.read(a, 4))[0]
     def w32(self, a, v): self.write(a, struct.pack('<I', v & 0xffffffff))
     def cstr(self, a, limit=4096):
@@ -120,9 +153,10 @@ class Emulator:
     def host_path(self, guest):
         if guest.startswith(self.app_guest):
             return self.app_dir + guest[len(self.app_guest):]
-        if guest.startswith('/var/mobile/Applications/00000000-0000-0000-0000-000000000001'):
-            sandbox = os.path.join(os.path.dirname(self.app_dir), 'sandbox')
-            return sandbox + guest[len('/var/mobile/Applications/00000000-0000-0000-0000-000000000001'):]
+        if guest.startswith(CONTAINER):
+            return self.container + guest[len(CONTAINER):]
+        if guest in DEVICES:
+            return DEVICES[guest]()
         p = guest
         for _ in range(16):   # resolve absolute symlinks inside the root ourselves
             host = self.rootfs + p
@@ -229,6 +263,17 @@ class Emulator:
                 self.commpage_reads.add(off)
                 print(f'[commpage] read +{off:#x} ({size}) from {self.syms.name(uc.reg_read(UC_ARM_REG_PC))}')
         self.uc.hook_add(UC_HOOK_MEM_READ, on_cp, begin=COMMPAGE, end=COMMPAGE + PAGE - 1)
+        if os.environ.get('WATCH'):
+            from unicorn import UC_HOOK_MEM_WRITE
+            wa = int(os.environ['WATCH'], 16)
+            def on_w(uc, access, address, size, value, data):
+                t = getattr(getattr(self, 'sched', None), 'cur', None)
+                print(f'[watch] t{t.tid if t else 0} write {address:#x} size {size} value {value:#x} pc={self.syms.name(uc.reg_read(UC_ARM_REG_PC))} lr={self.syms.name(uc.reg_read(UC_ARM_REG_LR))}')
+            self.uc.hook_add(UC_HOOK_MEM_WRITE, lambda uc, ac, ad, sz, v, d: on_w(uc, ac, ad, sz, v, d) if ad + sz > wa and ad < wa + 8 else None, begin=wa - 64, end=wa + 7)
+        if os.environ.get('TRACK_CF'):
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+            import trackcf
+            trackcf.install(self)
         for b in filter(None, os.environ.get('BREAK', '').split(',')):
             a = int(b, 16)
             self.uc.hook_add(UC_HOOK_CODE, self.on_break, begin=a, end=a)
@@ -243,6 +288,46 @@ class Emulator:
     def on_break(self, uc, address, size, data):
         r = [uc.reg_read(UC_ARM_REG_R0 + i) for i in range(13)]
         print(f'[break] {self.syms.name(address)} ' + ' '.join(f'r{i}={v:#x}' for i, v in enumerate(r[:8])) + f' lr={self.syms.name(uc.reg_read(UC_ARM_REG_LR))}')
+        for d in filter(None, os.environ.get('BREAK_DUMP', '').split(',')):
+            a = int(d, 16)
+            print(f'        [{a:#x}]', [hex(self.r32(a + 4 * i)) for i in range(4)])
+        if os.environ.get('BREAK_CFSTR'):
+            for i in range(3):
+                print(f'        r{i}: {self.cfstring(r[i])!r}')
+        if os.environ.get('BREAK_OBJ'):
+            self._bhits = getattr(self, '_bhits', 0) + 1
+            if self._bhits > int(os.environ['BREAK_OBJ']):
+                return
+            try:
+                isa = self.r32(r[0])
+                print(f'        r0 isa {isa:#x} = {self.syms.name(isa)}; words', [hex(self.r32(r[0] + 4 * i)) for i in range(4)])
+            except Exception as e:
+                print('        r0?', e)
+        if os.environ.get('BREAK_VA'):
+            try:
+                va = r[2]
+                print('        va:', [hex(self.r32(va + 4 * i)) for i in range(4)], self.read(self.r32(va), 64).split(b'\0')[0])
+            except Exception as e:
+                print('        va?', e)
+        for v in r[:4]:
+            try:
+                b = self.read(v, 96)
+                if b[:1].isascii() and b[:1] >= b' ' and b'\0' in b:
+                    print('        string:', b.split(b'\0')[0])
+            except Exception:
+                pass
+
+    def cfstring(self, a):
+        """Best-effort text of a constant CFString (isa, info, bytes, length)."""
+        try:
+            if a == 0:
+                return None
+            isa, info, p, n = struct.unpack('<4I', self.read(a, 16))
+            if n < 4096 and p:
+                return self.read(p, n).decode('utf-8', 'replace')
+        except Exception:
+            pass
+        return f'<{a:#x}>'
 
     def describe_pc(self):
         from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
@@ -259,44 +344,81 @@ class Emulator:
 
     def backtrace(self, limit=24):
         fp = self.uc.reg_read(UC_ARM_REG_R7)
-        print('[emu] backtrace:')
-        print('   ', self.syms.name(self.uc.reg_read(UC_ARM_REG_PC)))
-        print('   ', self.syms.name(self.uc.reg_read(UC_ARM_REG_LR)))
-        for _ in range(limit):
+        frames = [self.uc.reg_read(UC_ARM_REG_PC), self.uc.reg_read(UC_ARM_REG_LR)]
+        for _ in range(1000000):
             try:
                 nfp, lr = self.r32(fp), self.r32(fp + 4)
             except Exception:
                 break
             if not lr:
                 break
-            print('   ', self.syms.name(lr))
+            frames.append(lr)
             if nfp <= fp:
                 break
             fp = nfp
+        print(f'[emu] backtrace ({len(frames)} frames):')
+        if len(frames) > 1000:      # compress runs of one return address
+            runs = []
+            for a in frames:
+                if runs and runs[-1][0] == a:
+                    runs[-1][1] += 1
+                else:
+                    runs.append([a, 1])
+            if len(runs) < 200:
+                for a, n in runs:
+                    print('   ', f'{a:#x}', self.syms.name(a), f'x{n}' if n > 1 else '')
+                return
+        tail = int(os.environ.get('BT_TAIL', 16))
+        shown = frames if len(frames) <= limit + tail else frames[:limit] + [None] + frames[-tail:]
+        for a in shown:
+            print('   ', '...' if a is None else self.syms.name(a))
 
-    def run(self, max_insns=0):
-        pc = self.entry
-        thumb = pc & 1
+    def run(self, max_insns=0, slice_insns=int(os.environ.get("PP_SLICE", 0))):
+        from sched import Scheduler, Thread
+        self.sched = Scheduler(self)
+        self.uc.reg_write(UC_ARM_REG_PC, self.entry & ~1)
+        main = Thread(self.uc.context_save(), 'main', self.kernel.thread_port)
+        self.sched.add(main)
         t0 = time.time()
-        while True:
-            try:
-                self.uc.emu_start(pc | thumb, 0xffffffff, count=max_insns)
+        executed = 0
+        while self.kernel.exited is None:
+            t, state = self.sched.pick()
+            if t is None:
+                print('[emu] every thread is blocked for ever:')
+                for th in self.sched.threads:
+                    print('     ', th)
                 break
+            self.sched.cur = t
+            self.sched.wake_state(t, state)
+            if t.ready is not None or t.dead:      # its completion blocked it again
+                t.ctx = self.uc.context_save()
+                continue
+            pc = self.uc.reg_read(UC_ARM_REG_PC)
+            thumb = (self.uc.reg_read(UC_ARM_REG_CPSR) >> 5) & 1
+            try:
+                self.uc.emu_start(pc | thumb, 0xffffffff, count=slice_insns)
             except UcError as e:
-                if self.kernel.exited is not None:
-                    break
                 regs = {n: self.uc.reg_read(r) for n, r in [('pc', UC_ARM_REG_PC), ('lr', UC_ARM_REG_LR), ('sp', UC_ARM_REG_SP),
                         ('r0', UC_ARM_REG_R0), ('r1', UC_ARM_REG_R1), ('r2', UC_ARM_REG_R2), ('r3', UC_ARM_REG_R3), ('r12', UC_ARM_REG_R12)]}
-                print('[emu] stopped:', e, ' '.join(f'{k}={v:#x}' for k, v in regs.items()))
+                print(f'[emu] thread {t.tid} ({t.name}) stopped:', e, ' '.join(f'{k}={v:#x}' for k, v in regs.items()))
                 self.describe_pc()
                 self.backtrace()
                 break
-        print(f'[emu] ran {time.time() - t0:.1f}s, exit={self.kernel.exited}')
+            t.ctx = self.uc.context_save()
+            from sched import CLOCK
+            CLOCK.tick(0.0005)
+            executed += slice_insns
+            if max_insns and executed >= max_insns:
+                print('[emu] instruction limit reached')
+                for th in self.sched.threads:
+                    print('     ', th)
+                break
+        print(f'[emu] ran {time.time() - t0:.1f}s, exit={self.kernel.exited}, threads={len(self.sched.threads)}')
 
 
 if __name__ == '__main__':
     rootfs, app = sys.argv[1], sys.argv[2]
     emu = Emulator(rootfs, app)
     exe_name = os.path.basename(app).rsplit('.', 1)[0]
-    emu.setup([emu.app_guest + '/' + exe_name], ['HOME=/var/mobile/Applications/00000000-0000-0000-0000-000000000001', 'DYLD_PRINT_LIBRARIES=1' if os.environ.get('DYLD_LIBS') else 'X=1'])
+    emu.setup([emu.app_guest + '/' + exe_name], ['HOME=' + CONTAINER, 'TMPDIR=' + CONTAINER + '/tmp/', 'IPHONE_SHARED_RESOURCES_DIRECTORY=/var/mobile', 'USER=mobile', 'LOGNAME=mobile', 'SHELL=/bin/sh', 'DYLD_PRINT_LIBRARIES=1' if os.environ.get('DYLD_LIBS') else 'X=1'])
     emu.run(int(sys.argv[3]) if len(sys.argv) > 3 else 0)

@@ -41,19 +41,25 @@ class MachMsg:
                 return MACH_RCV_TIMED_OUT
             return KERN_SUCCESS
         bits, size, remote, local, reserved, mid = struct.unpack('<6I', self.emu.read(msg_p, 24))
-        size = min(size, send_size) if send_size else size
+        if remote == 0 or remote == 0xffffffff:
+            return 0x10000003          # MACH_SEND_INVALID_DEST
+        size = send_size or size        # the kernel goes by send_size; msgh_size is not trusted
         body = self.emu.read(msg_p + 24, max(0, size - 24))
         name = NAMES.get(mid, '?')
-        dest = self.k.ports.get(remote, f'port {remote:#x}')
+        dest = self.k.pr.kind(remote) or f'port {remote:#x}'
         n = self.seen.get(mid, 0) + 1
         self.seen[mid] = n
         if n <= 3 or self.emu.trace:
             print(f'[mach] msg id {mid} ({name}) to {dest}, size {size} bits {bits:#x} send_size {send_size} opt {option:#x}')
-        h = getattr(self, 'mig_' + name.replace('?', ''), None)
-        out = h(body, remote) if h else None
+        if dest == 'bootstrap':
+            out = self.k.bootstrap.handle(mid, body)
+            h = out is not None
+        else:
+            h = getattr(self, 'mig_' + name.replace('?', ''), None)
+            out = h(body, remote) if h else None
         if isinstance(out, bytearray):     # pre-built complex reply body (after the header)
             if option & MACH_RCV_MSG:
-                header = struct.pack('<6I', 0x80000012, 24 + len(out), 0, local, 0, mid + 100)
+                header = struct.pack('<6I', 0x80000000 | 0x12, 24 + len(out), 0, local, 0, mid + 100)
                 self.emu.write(msg_p, header + bytes(out))
             return KERN_SUCCESS
         if out is None:
@@ -153,7 +159,7 @@ class MachMsg:
     def mig_semaphore_create(self, body, port):
         policy, value = struct.unpack_from('<ii', body, 8)
         p = self.k.new_port('semaphore')
-        self.k.semaphores[p] = value
+        self.k.pr.get(p).value = value
         return ([p], None)
 
     def mig_semaphore_destroy(self, body, port): return struct.pack('<i', KERN_SUCCESS)
