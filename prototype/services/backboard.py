@@ -58,3 +58,15 @@ class Launcher:
         msg = gs_event(self.port, APPLICATION_LAUNCH, info=launch_info())
         self.k.pr.get(self.port).queue.append((msg, [], TOKEN_SYSTEM))
         print(f'[backboard] application-launch event sent to {self.port:#x}')
+
+
+from services.base import MigServer
+
+
+class HIDServices(MigServer):
+    """backboardd's HID services (accelerometer, buttons). Requests are acknowledged; sensor
+    events are not produced yet."""
+    name = 'hid'
+
+    def default(self, req):
+        return self.reply(req, ret=0)

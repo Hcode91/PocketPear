@@ -25,6 +25,8 @@ class Bootstrap:
         from services.springboard import Workspace, SystemApp
         self.providers['PurpleWorkspacePort'] = lambda: Workspace(kernel).port
         self.providers['PurpleSystemAppPort'] = lambda: SystemApp(kernel).port
+        from services.backboard import HIDServices
+        self.providers['com.apple.backboard.hid.services'] = lambda: HIDServices(kernel).port
         from services.carender import RenderServer
         self.providers['com.apple.CARenderServer'] = lambda: RenderServer(kernel).port
 

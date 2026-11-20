@@ -1,0 +1,673 @@
+"""OpenGL ES for the guest, run on the host's OpenGL ES (Mesa through EGL here; the device's own
+GLES on Android later).
+
+The guest's OpenGLES.framework talks to the PowerVR driver through IOKit, which is not here, so
+its exported gl* functions and the EAGLContext methods are replaced (hle.Stubs) with Python ones
+that call the host. Object names (textures, buffers...) are the host's. iOS passes float
+arguments in core registers (softfp), so every argument starts as a 32-bit word.
+"""
+import ctypes
+import os
+import struct
+
+from unicorn.arm_const import *
+
+# ---------------------------------------------------------------------------- host
+_egl = ctypes.CDLL('libEGL.so.1')
+_gl = ctypes.CDLL('libGLESv2.so.2')
+_egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+_egl.eglCreateContext.restype = ctypes.c_void_p
+_egl.eglGetProcAddress.restype = ctypes.c_void_p
+
+C = {'i': ctypes.c_int, 'u': ctypes.c_uint, 'f': ctypes.c_float, 'b': ctypes.c_ubyte, 'p': ctypes.c_void_p,
+     'z': ctypes.c_ssize_t}
+
+
+def host(name, args, ret='v'):
+    fn = getattr(_gl, name, None)
+    if fn is None:
+        a = _egl.eglGetProcAddress(name.encode())
+        if not a:
+            return None
+        fn = ctypes.CFUNCTYPE(None)(a)
+        fn = ctypes.cast(a, ctypes.CFUNCTYPE(*([C.get(ret)] if ret != 'v' else [None]) + [C[c] for c in args]))
+    else:
+        fn.argtypes = [C[c] for c in args]
+        fn.restype = None if ret == 'v' else C[ret]
+    return fn
+
+
+# Every core OpenGL ES 2.0 function whose arguments are all scalars: name -> (args, return).
+SCALAR = {
+    'glActiveTexture': ('u', 'v'), 'glAttachShader': ('uu', 'v'), 'glBindBuffer': ('uu', 'v'),
+    'glBindFramebuffer': ('uu', 'v'), 'glBindRenderbuffer': ('uu', 'v'), 'glBindTexture': ('uu', 'v'),
+    'glBlendColor': ('ffff', 'v'), 'glBlendEquation': ('u', 'v'), 'glBlendEquationSeparate': ('uu', 'v'),
+    'glBlendFunc': ('uu', 'v'), 'glBlendFuncSeparate': ('uuuu', 'v'), 'glCheckFramebufferStatus': ('u', 'u'),
+    'glClear': ('u', 'v'), 'glClearColor': ('ffff', 'v'), 'glClearDepthf': ('f', 'v'), 'glClearStencil': ('i', 'v'),
+    'glColorMask': ('bbbb', 'v'), 'glCompileShader': ('u', 'v'), 'glCopyTexImage2D': ('uiuiiiii', 'v'),
+    'glCopyTexSubImage2D': ('uiiiiiii', 'v'), 'glCreateProgram': ('', 'u'), 'glCreateShader': ('u', 'u'),
+    'glCullFace': ('u', 'v'), 'glDeleteProgram': ('u', 'v'), 'glDeleteShader': ('u', 'v'), 'glDepthFunc': ('u', 'v'),
+    'glDepthMask': ('b', 'v'), 'glDepthRangef': ('ff', 'v'), 'glDetachShader': ('uu', 'v'), 'glDisable': ('u', 'v'),
+    'glDisableVertexAttribArray': ('u', 'v'), 'glEnable': ('u', 'v'), 'glEnableVertexAttribArray': ('u', 'v'),
+    'glFinish': ('', 'v'), 'glFlush': ('', 'v'), 'glFramebufferRenderbuffer': ('uuuu', 'v'),
+    'glFramebufferTexture2D': ('uuuui', 'v'), 'glFrontFace': ('u', 'v'), 'glGenerateMipmap': ('u', 'v'),
+    'glGetError': ('', 'u'), 'glHint': ('uu', 'v'), 'glIsBuffer': ('u', 'b'), 'glIsEnabled': ('u', 'b'),
+    'glIsFramebuffer': ('u', 'b'), 'glIsProgram': ('u', 'b'), 'glIsRenderbuffer': ('u', 'b'), 'glIsShader': ('u', 'b'),
+    'glIsTexture': ('u', 'b'), 'glLineWidth': ('f', 'v'), 'glLinkProgram': ('u', 'v'), 'glPixelStorei': ('ui', 'v'),
+    'glPolygonOffset': ('ff', 'v'), 'glReleaseShaderCompiler': ('', 'v'), 'glRenderbufferStorage': ('uuii', 'v'),
+    'glSampleCoverage': ('fb', 'v'), 'glScissor': ('iiii', 'v'), 'glStencilFunc': ('uiu', 'v'),
+    'glStencilFuncSeparate': ('uuiu', 'v'), 'glStencilMask': ('u', 'v'), 'glStencilMaskSeparate': ('uu', 'v'),
+    'glStencilOp': ('uuu', 'v'), 'glStencilOpSeparate': ('uuuu', 'v'), 'glTexParameterf': ('uuf', 'v'),
+    'glTexParameteri': ('uui', 'v'), 'glUniform1f': ('if', 'v'), 'glUniform2f': ('iff', 'v'),
+    'glUniform3f': ('ifff', 'v'), 'glUniform4f': ('iffff', 'v'), 'glUniform1i': ('ii', 'v'), 'glUniform2i': ('iii', 'v'),
+    'glUniform3i': ('iiii', 'v'), 'glUniform4i': ('iiiii', 'v'), 'glUseProgram': ('u', 'v'),
+    'glValidateProgram': ('u', 'v'), 'glVertexAttrib1f': ('uf', 'v'), 'glVertexAttrib2f': ('uff', 'v'),
+    'glVertexAttrib3f': ('ufff', 'v'), 'glVertexAttrib4f': ('uffff', 'v'), 'glViewport': ('iiii', 'v'),
+    # extensions iOS has, mapped onto OpenGL ES 3 core
+    'glBindVertexArrayOES': ('u', 'v', 'glBindVertexArray'), 'glIsVertexArrayOES': ('u', 'b', 'glIsVertexArray'),
+    'glRenderbufferStorageMultisampleAPPLE': ('uiuii', 'v', 'glRenderbufferStorageMultisample'),
+    'glTexStorage2DEXT': ('uiuii', 'v', 'glTexStorage2D'),
+}
+
+# How many values glGet* writes, by parameter name (anything else: one)
+GET_COUNTS = {0x0BA2: 4, 0x0C10: 4, 0x0C22: 4, 0x0C23: 4, 0x8005: 4, 0x0D3A: 2, 0x846D: 2, 0x846E: 2, 0x0B70: 2}
+
+GL_VENDOR, GL_RENDERER, GL_VERSION, GL_EXTENSIONS, GL_SHADING_LANGUAGE_VERSION = 0x1F00, 0x1F01, 0x1F02, 0x1F03, 0x8B8C
+# What an iPhone 5 (PowerVR SGX 543MP3, iOS 6) reports, so games take the paths they take there.
+DEVICE_STRINGS = {
+    GL_VENDOR: 'Imagination Technologies', GL_RENDERER: 'PowerVR SGX 543',
+    GL_VERSION: 'OpenGL ES 2.0 IMGSGX543-73.16', GL_SHADING_LANGUAGE_VERSION: 'OpenGL ES GLSL ES 1.00',
+    GL_EXTENSIONS: ' '.join([
+        'GL_OES_depth_texture', 'GL_OES_depth24', 'GL_OES_element_index_uint', 'GL_OES_fbo_render_mipmap',
+        'GL_OES_mapbuffer', 'GL_OES_packed_depth_stencil', 'GL_OES_rgb8_rgba8', 'GL_OES_standard_derivatives',
+        'GL_OES_texture_float', 'GL_OES_texture_half_float', 'GL_OES_vertex_array_object',
+        'GL_EXT_blend_minmax', 'GL_EXT_debug_label', 'GL_EXT_debug_marker', 'GL_EXT_discard_framebuffer',
+        'GL_EXT_read_format_bgra', 'GL_EXT_separate_shader_objects', 'GL_EXT_shader_texture_lod',
+        'GL_EXT_texture_filter_anisotropic', 'GL_APPLE_framebuffer_multisample', 'GL_APPLE_rgb_422',
+        'GL_APPLE_texture_format_BGRA8888', 'GL_APPLE_texture_max_level', 'GL_IMG_read_format',
+        'GL_IMG_texture_compression_pvrtc']),
+}
+
+GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER = 0x8892, 0x8893
+GL_ARRAY_BUFFER_BINDING, GL_ELEMENT_ARRAY_BUFFER_BINDING = 0x8894, 0x8895
+GL_FRAMEBUFFER, GL_RENDERBUFFER, GL_COLOR_ATTACHMENT0 = 0x8D40, 0x8D41, 0x8CE0
+GL_RENDERBUFFER_BINDING, GL_FRAMEBUFFER_BINDING = 0x8CA7, 0x8CA6
+TYPE_SIZES = {0x1400: 1, 0x1401: 1, 0x1402: 2, 0x1403: 2, 0x1404: 4, 0x1405: 4, 0x1406: 4, 0x140C: 4, 0x8D61: 2}
+
+
+def bits_to_float(w):
+    return struct.unpack('<f', struct.pack('<I', w & 0xffffffff))[0]
+
+
+class GLES:
+    def __init__(self, emu):
+        self.emu = emu
+        self.uc = emu.uc
+        self.display = None
+        self.contexts = {}           # guest EAGLContext -> (host context, api)
+        self.current = {}            # thread id -> guest EAGLContext
+        self.strings = {}
+        self.attribs = {}            # index -> (size, type, normalized, stride, guest pointer) for client arrays
+        self.mapped = {}             # buffer target -> (guest address, size, host buffer)
+        self.frame = 0
+        self.unimplemented = {}
+        self.out_dir = os.environ.get('PP_FRAMES', '/tmp/pocketpear-frames')
+        os.makedirs(self.out_dir, exist_ok=True)
+        landscape = any('Landscape' in str(o) for o in (emu.info.get('UISupportedInterfaceOrientations') or [])) \
+            if not str(emu.info.get('UIInterfaceOrientation', '')).endswith('Portrait') else False
+        self.screen = (1136, 640) if landscape else (640, 1136)
+
+    # ------------------------------------------------------------------------ plumbing
+    def arg(self, n):
+        if n < 4:
+            return self.uc.reg_read(UC_ARM_REG_R0 + n)
+        return self.emu.r32(self.uc.reg_read(UC_ARM_REG_SP) + 4 * (n - 4))
+
+    def args(self, n):
+        return [self.arg(i) for i in range(n)]
+
+    def ret(self, v):
+        self.uc.reg_write(UC_ARM_REG_R0, int(v) & 0xffffffff)
+
+    def alloc(self, size):
+        a = self.emu.find_free(size)
+        self.emu.map(a, size)
+        return a
+
+    def ensure_display(self):
+        if self.display is not None:
+            return
+        d = _egl.eglGetPlatformDisplay(0x31DD, None, None)          # EGL_PLATFORM_SURFACELESS_MESA
+        maj, mi = ctypes.c_int(), ctypes.c_int()
+        _egl.eglInitialize(ctypes.c_void_p(d), ctypes.byref(maj), ctypes.byref(mi))
+        _egl.eglBindAPI(0x30A0)
+        cfg, n = ctypes.c_void_p(), ctypes.c_int()
+        attrs = (ctypes.c_int * 13)(0x3040, 0x40, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3025, 24, 0x3038)
+        _egl.eglChooseConfig(ctypes.c_void_p(d), attrs, ctypes.byref(cfg), 1, ctypes.byref(n))
+        self.display, self.config = d, cfg
+        self.share = None
+        print(f'[gles] host EGL {maj.value}.{mi.value}, screen {self.screen[0]}x{self.screen[1]}')
+
+    def make_current(self, guest_ctx):
+        ctx = self.contexts.get(guest_ctx, (None,))[0] if guest_ctx else None
+        _egl.eglMakeCurrent(ctypes.c_void_p(self.display), None, None, ctypes.c_void_p(ctx) if ctx else None)
+
+    # ------------------------------------------------------------------------ install
+    def install(self, stubs, syms):
+        """syms: name -> address for OpenGLES.framework; thumb: set of Thumb addresses."""
+        made = 0
+        for name, addr in syms.items():
+            impl = None
+            base = name[1:] if name.startswith('_') else name
+            if base.endswith('OES') and base not in SCALAR and base not in ('glGenVertexArraysOES', 'glDeleteVertexArraysOES',
+                                                                             'glMapBufferOES', 'glUnmapBufferOES'):
+                core = base[:-3]                         # framebuffer_object's OES names are core in ES 2.0
+                if core in SCALAR or core in ('glGenFramebuffers', 'glGenRenderbuffers', 'glDeleteFramebuffers',
+                                              'glDeleteRenderbuffers') or core in GLES.__dict__:
+                    base = core
+            if base in SCALAR:
+                impl = self.scalar(base)
+            elif hasattr(self, base):
+                impl = getattr(self, base)
+            elif base.startswith('gl'):
+                impl = self.missing(base)
+            elif name in OBJC:
+                impl = getattr(self, OBJC[name])
+            if impl is not None:
+                stubs.replace(addr, impl, addr in self.emu.syms.thumb)
+                made += 1
+        print(f'[gles] {made} OpenGL ES entry points replaced')
+
+    def scalar(self, name):
+        spec = SCALAR[name]
+        args, rtype = spec[0], spec[1]
+        fn = host(spec[2] if len(spec) > 2 else name, args, rtype)
+        if fn is None:
+            return self.missing(name)
+        def call():
+            vals = []
+            for i, c in enumerate(args):
+                w = self.arg(i)
+                vals.append(bits_to_float(w) if c == 'f' else (w & 0xff if c == 'b' else (w - (1 << 32) if c == 'i' and w & 0x80000000 else w)))
+            r = fn(*vals)
+            if rtype != 'v':
+                self.ret(r or 0)
+        return call
+
+    def missing(self, name):
+        def call():
+            n = self.unimplemented.get(name, 0) + 1
+            self.unimplemented[name] = n
+            if n <= 2:
+                print(f'[gles] {name} not implemented')
+            self.ret(0)
+        return call
+
+    # ------------------------------------------------------------------------ EAGL
+    def eagl_init_with_api(self):
+        guest, _cmd, api = self.args(3)
+        self.ensure_display()
+        if api not in (1, 2):
+            self.ret(0); return
+        version = (ctypes.c_int * 3)(0x3098, 2 if api == 2 else 1, 0x3038)
+        ctx = _egl.eglCreateContext(ctypes.c_void_p(self.display), self.config, ctypes.c_void_p(self.share), version)
+        if not ctx:
+            print('[gles] host context creation failed')
+            self.ret(0); return
+        if self.share is None:
+            self.share = ctx
+        self.contexts[guest] = (ctx, api)
+        print(f'[gles] EAGLContext {guest:#x} (OpenGL ES {api}.0) -> host context {ctx:#x}')
+        self.ret(guest)
+
+    def eagl_init_with_api_sharegroup(self):
+        self.eagl_init_with_api()
+
+    def eagl_set_current(self):
+        cls, _cmd, guest = self.args(3)
+        tid = self.emu.sched.cur.tid
+        self.current[tid] = guest
+        self.make_current(guest)
+        self.ret(1)
+
+    def eagl_current(self):
+        self.ret(self.current.get(self.emu.sched.cur.tid, 0))
+
+    def eagl_api(self):
+        guest = self.arg(0)
+        self.ret(self.contexts.get(guest, (0, 0))[1])
+
+    def eagl_sharegroup(self):
+        self.ret(0)
+
+    def eagl_dealloc(self):
+        self.ret(0)
+
+    def eagl_storage_from_drawable(self):
+        guest, _cmd, target, layer = self.args(4)
+        w, h = self.screen
+        _gl.glRenderbufferStorage(target, 0x8058, w, h)      # GL_RGBA8_OES
+        print(f'[gles] renderbuffer storage from drawable {layer:#x}: {w}x{h}')
+        self.ret(1)
+
+    def eagl_present(self):
+        guest, _cmd, target = self.args(3)
+        self.frame += 1
+        every = int(os.environ.get('PP_FRAME_EVERY', 30))
+        if self.frame == 1 or self.frame % every == 0:
+            self.save_frame()
+        self.ret(1)
+
+    def save_frame(self):
+        rb = ctypes.c_int()
+        _gl.glGetIntegerv(GL_RENDERBUFFER_BINDING, ctypes.byref(rb))
+        prev = ctypes.c_int()
+        _gl.glGetIntegerv(GL_FRAMEBUFFER_BINDING, ctypes.byref(prev))
+        fbo = ctypes.c_uint()
+        _gl.glGenFramebuffers(1, ctypes.byref(fbo))
+        _gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        _gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb.value)
+        w, h = self.screen
+        buf = (ctypes.c_ubyte * (w * h * 4))()
+        _gl.glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf)
+        _gl.glBindFramebuffer(GL_FRAMEBUFFER, prev.value)
+        _gl.glDeleteFramebuffers(1, ctypes.byref(fbo))
+        try:
+            from PIL import Image
+            img = Image.frombuffer('RGBA', (w, h), bytes(buf), 'raw', 'RGBA', 0, -1)
+            path = os.path.join(self.out_dir, f'frame{self.frame:05d}.png')
+            img.save(path)
+            print(f'[gles] frame {self.frame} -> {path}')
+        except Exception as e:
+            print('[gles] could not save frame:', e)
+
+    # ------------------------------------------------------------------------ pointers
+    def read(self, a, n):
+        return self.emu.read(a, n) if a and n > 0 else b''
+
+    def glGetString(self):
+        name, = self.args(1)
+        if name not in self.strings:
+            text = DEVICE_STRINGS.get(name)
+            if text is None:
+                self.ret(0); return
+            b = text.encode() + b'\0'
+            a = self.alloc(len(b))
+            self.emu.write(a, b)
+            self.strings[name] = a
+        self.ret(self.strings[name])
+
+    def gen(self, hostname):
+        fn = host(hostname, 'ip')
+        def call():
+            n, p = self.args(2)
+            arr = (ctypes.c_uint * max(n, 1))()
+            fn(n, arr)
+            self.emu.write(p, bytes(arr)[:4 * n])
+        return call
+
+    def delete(self, hostname):
+        fn = host(hostname, 'ip')
+        def call():
+            n, p = self.args(2)
+            data = self.read(p, 4 * n)
+            arr = (ctypes.c_uint * max(n, 1)).from_buffer_copy(data.ljust(4 * max(n, 1), b'\0'))
+            fn(n, arr)
+        return call
+
+    def __getattr__(self, name):
+        table = {'glGenBuffers': ('gen', 'glGenBuffers'), 'glGenTextures': ('gen', 'glGenTextures'),
+                 'glGenFramebuffers': ('gen', 'glGenFramebuffers'), 'glGenRenderbuffers': ('gen', 'glGenRenderbuffers'),
+                 'glGenVertexArraysOES': ('gen', 'glGenVertexArrays'),
+                 'glDeleteBuffers': ('delete', 'glDeleteBuffers'), 'glDeleteTextures': ('delete', 'glDeleteTextures'),
+                 'glDeleteFramebuffers': ('delete', 'glDeleteFramebuffers'),
+                 'glDeleteRenderbuffers': ('delete', 'glDeleteRenderbuffers'),
+                 'glDeleteVertexArraysOES': ('delete', 'glDeleteVertexArrays')}
+        if name in table:
+            kind, h = table[name]
+            return getattr(self, kind)(h)
+        raise AttributeError(name)
+
+    def glBufferData(self):
+        target, size, data, usage = self.args(4)
+        blob = self.read(data, size)
+        _gl.glBufferData(ctypes.c_uint(target), ctypes.c_ssize_t(size), blob if data else None, ctypes.c_uint(usage))
+
+    def glBufferSubData(self):
+        target, off, size, data = self.args(4)
+        _gl.glBufferSubData(ctypes.c_uint(target), ctypes.c_ssize_t(off), ctypes.c_ssize_t(size), self.read(data, size))
+
+    def image_size(self, w, h, fmt, typ):
+        comps = {0x1906: 1, 0x1909: 1, 0x190A: 2, 0x1907: 3, 0x1908: 4, 0x80E1: 4, 0x1902: 1}.get(fmt, 4)
+        if typ in (0x8363, 0x8033, 0x8034):            # packed 16-bit
+            bpp = 2
+        else:
+            bpp = comps * TYPE_SIZES.get(typ, 1)
+        row = (w * bpp + 3) & ~3                       # default unpack alignment 4
+        return row * h
+
+    def glTexImage2D(self):
+        target, level, ifmt, w, h, border, fmt, typ, pixels = self.args(9)
+        data = self.read(pixels, self.image_size(w, h, fmt, typ))
+        if fmt == 0x80E1:                              # BGRA: swap to RGBA for the host
+            data, fmt, ifmt = bgra_to_rgba(data), 0x1908, 0x1908
+        _gl.glTexImage2D(target, level, ifmt, w, h, border, fmt, typ, data if pixels else None)
+
+    def glTexSubImage2D(self):
+        target, level, x, y, w, h, fmt, typ, pixels = self.args(9)
+        data = self.read(pixels, self.image_size(w, h, fmt, typ))
+        if fmt == 0x80E1:
+            data, fmt = bgra_to_rgba(data), 0x1908
+        _gl.glTexSubImage2D(target, level, x, y, w, h, fmt, typ, data)
+
+    def glCompressedTexImage2D(self):
+        target, level, ifmt, w, h, border, size, data = self.args(8)
+        blob = self.read(data, size)
+        if 0x8C00 <= ifmt <= 0x8C03:                   # PVRTC: decoded on the CPU
+            from pvrtc import decode
+            rgba = decode(blob, w, h, 2 if ifmt in (0x8C01, 0x8C03) else 4)
+            _gl.glTexImage2D(target, level, 0x1908, w, h, 0, 0x1908, 0x1401, rgba)
+            return
+        _gl.glCompressedTexImage2D(target, level, ifmt, w, h, border, size, blob)
+
+    def glReadPixels(self):
+        x, y, w, h, fmt, typ, pixels = self.args(7)
+        size = self.image_size(w, h, fmt, typ)
+        buf = (ctypes.c_ubyte * size)()
+        _gl.glReadPixels(x, y, w, h, fmt if fmt != 0x80E1 else 0x1908, typ, buf)
+        data = bytes(buf)
+        if fmt == 0x80E1:
+            data = bgra_to_rgba(data)
+        self.emu.write(pixels, data)
+
+    def glShaderSource(self):
+        shader, count, strings, lengths = self.args(4)
+        parts = []
+        for i in range(count):
+            sp = self.emu.r32(strings + 4 * i)
+            ln = self.emu.r32(lengths + 4 * i) if lengths else 0xffffffff
+            if ln & 0x80000000:
+                parts.append(self.emu.cstr(sp).encode() if hasattr(self.emu, 'cstr') else b'')
+            else:
+                parts.append(self.read(sp, ln))
+        src = fix_shader(b''.join(parts))
+        arr = (ctypes.c_char_p * 1)(src)
+        _gl.glShaderSource(shader, 1, arr, None)
+
+    def get_iv(self, hostname, nargs, count=1):
+        fn = getattr(_gl, hostname)
+        def call():
+            a = self.args(nargs)
+            out = a[-1]
+            buf = (ctypes.c_int * 16)()
+            fn(*a[:-1], buf)
+            n = GET_COUNTS.get(a[-2], count)
+            self.emu.write(out, bytes(buf)[:4 * n])
+        return call
+
+    def glGetIntegerv(self):
+        pname, out = self.args(2)
+        buf = (ctypes.c_int * 16)()
+        _gl.glGetIntegerv(pname, buf)
+        self.emu.write(out, bytes(buf)[:4 * GET_COUNTS.get(pname, 1)])
+
+    def glGetFloatv(self):
+        pname, out = self.args(2)
+        buf = (ctypes.c_float * 16)()
+        _gl.glGetFloatv(pname, buf)
+        self.emu.write(out, bytes(buf)[:4 * GET_COUNTS.get(pname, 1)])
+
+    def glGetBooleanv(self):
+        pname, out = self.args(2)
+        buf = (ctypes.c_ubyte * 16)()
+        _gl.glGetBooleanv(pname, buf)
+        self.emu.write(out, bytes(buf)[:GET_COUNTS.get(pname, 1)])
+
+    def glGetShaderiv(self): self.get_iv('glGetShaderiv', 3)()
+    def glGetProgramiv(self): self.get_iv('glGetProgramiv', 3)()
+    def glGetBufferParameteriv(self): self.get_iv('glGetBufferParameteriv', 3)()
+    def glGetRenderbufferParameteriv(self): self.get_iv('glGetRenderbufferParameteriv', 3)()
+    def glGetTexParameteriv(self): self.get_iv('glGetTexParameteriv', 3)()
+    def glGetFramebufferAttachmentParameteriv(self): self.get_iv('glGetFramebufferAttachmentParameteriv', 4)()
+    def glGetVertexAttribiv(self): self.get_iv('glGetVertexAttribiv', 3, 1)()
+    def glGetUniformiv(self): self.get_iv('glGetUniformiv', 3, 16)()
+
+    def glGetUniformfv(self):
+        prog, loc, out = self.args(3)
+        buf = (ctypes.c_float * 16)()
+        _gl.glGetUniformfv(prog, loc, buf)
+        self.emu.write(out, bytes(buf)[:4])
+
+    def info_log(self, hostname):
+        fn = getattr(_gl, hostname)
+        def call():
+            obj, size, length_p, log_p = self.args(4)
+            buf = ctypes.create_string_buffer(max(size, 1))
+            n = ctypes.c_int()
+            fn(obj, size, ctypes.byref(n), buf)
+            if length_p:
+                self.emu.w32(length_p, n.value)
+            if log_p and size:
+                self.emu.write(log_p, buf.raw[:min(size, n.value + 1)])
+            if n.value:
+                print(f'[gles] {hostname}: {buf.value.decode(errors="replace").strip()}')
+        return call
+
+    def glGetShaderInfoLog(self): self.info_log('glGetShaderInfoLog')()
+    def glGetProgramInfoLog(self): self.info_log('glGetProgramInfoLog')()
+
+    def glGetShaderPrecisionFormat(self):
+        stype, ptype, range_p, prec_p = self.args(4)
+        r, p = (ctypes.c_int * 2)(), ctypes.c_int()
+        _gl.glGetShaderPrecisionFormat(stype, ptype, r, ctypes.byref(p))
+        self.emu.write(range_p, bytes(r))
+        self.emu.w32(prec_p, p.value)
+
+    def located(self, hostname):
+        fn = getattr(_gl, hostname)
+        fn.restype = ctypes.c_int
+        def call():
+            prog, name_p = self.args(2)
+            self.ret(fn(prog, self.emu.cstr(name_p).encode()))
+        return call
+
+    def glGetAttribLocation(self): self.located('glGetAttribLocation')()
+    def glGetUniformLocation(self): self.located('glGetUniformLocation')()
+
+    def glBindAttribLocation(self):
+        prog, idx, name_p = self.args(3)
+        _gl.glBindAttribLocation(prog, idx, self.emu.cstr(name_p).encode())
+
+    def active(self, hostname):
+        fn = getattr(_gl, hostname)
+        def call():
+            prog, idx, size, len_p, sz_p, type_p, name_p = self.args(7)
+            n, sz, t = ctypes.c_int(), ctypes.c_int(), ctypes.c_uint()
+            buf = ctypes.create_string_buffer(max(size, 1))
+            fn(prog, idx, size, ctypes.byref(n), ctypes.byref(sz), ctypes.byref(t), buf)
+            if len_p:
+                self.emu.w32(len_p, n.value)
+            self.emu.w32(sz_p, sz.value)
+            self.emu.w32(type_p, t.value)
+            if size:
+                self.emu.write(name_p, buf.raw[:n.value + 1])
+        return call
+
+    def glGetActiveAttrib(self): self.active('glGetActiveAttrib')()
+    def glGetActiveUniform(self): self.active('glGetActiveUniform')()
+
+    def uniform_v(self, hostname, comps, ctype, matrix=False):
+        fn = getattr(_gl, hostname)
+        def call():
+            if matrix:
+                loc, count, transpose, p = self.args(4)
+                data = self.read(p, 4 * comps * count)
+                fn(loc, count, transpose & 0xff, (ctype * (comps * count)).from_buffer_copy(data))
+            else:
+                loc, count, p = self.args(3)
+                data = self.read(p, 4 * comps * count)
+                fn(loc, count, (ctype * (comps * count)).from_buffer_copy(data))
+        return call
+
+    def glTexParameteriv(self):
+        target, pname, p = self.args(3)
+        _gl.glTexParameteri(target, pname, ctypes.c_int(self.emu.r32(p)))
+
+    def glTexParameterfv(self):
+        target, pname, p = self.args(3)
+        _gl.glTexParameterf(target, pname, ctypes.c_float(bits_to_float(self.emu.r32(p))))
+
+    def attrib_v(self, comps):
+        fn = getattr(_gl, f'glVertexAttrib{comps}fv')
+        def call():
+            idx, p = self.args(2)
+            fn(idx, (ctypes.c_float * comps).from_buffer_copy(self.read(p, 4 * comps)))
+        return call
+
+    # ------------------------------------------------------------------------ drawing
+    def bound(self, binding):
+        v = ctypes.c_int()
+        _gl.glGetIntegerv(binding, ctypes.byref(v))
+        return v.value
+
+    def glVertexAttribPointer(self):
+        idx, size, typ, norm, stride, ptr = self.args(6)
+        if self.bound(GL_ARRAY_BUFFER_BINDING):
+            self.attribs.pop(idx, None)
+            _gl.glVertexAttribPointer(idx, size, typ, norm & 0xff, stride, ctypes.c_void_p(ptr))
+        else:
+            self.attribs[idx] = (size, typ, norm & 0xff, stride, ptr)
+
+    def upload_client_arrays(self, first, count):
+        """Client-side vertex arrays live in guest memory: copy the range a draw reads into a
+        temporary host buffer and point the attribute at it."""
+        if not self.attribs:
+            return None
+        vbo = ctypes.c_uint()
+        _gl.glGenBuffers(1, ctypes.byref(vbo))
+        _gl.glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        blob = b''
+        layout = []
+        for idx, (size, typ, norm, stride, ptr) in self.attribs.items():
+            elem = size * TYPE_SIZES.get(typ, 4)
+            st = stride or elem
+            start = ptr + first * st
+            data = self.read(start, st * (count - 1) + elem) if count else b''
+            off = len(blob)
+            blob += data + bytes((-len(data)) % 4)
+            layout.append((idx, size, typ, norm, st, off - first * st if False else off))
+        _gl.glBufferData(GL_ARRAY_BUFFER, len(blob), blob, 0x88E0)       # GL_STREAM_DRAW
+        for idx, size, typ, norm, st, off in layout:
+            # the copied data starts at element `first`
+            _gl.glVertexAttribPointer(idx, size, typ, norm, st, ctypes.c_void_p(off - first * st))
+        return vbo
+
+    def finish_client_arrays(self, vbo):
+        if vbo is None:
+            return
+        _gl.glBindBuffer(GL_ARRAY_BUFFER, 0)
+        _gl.glDeleteBuffers(1, ctypes.byref(vbo))
+
+    def glDrawArrays(self):
+        mode, first, count = self.args(3)
+        vbo = self.upload_client_arrays(first, count)
+        _gl.glDrawArrays(mode, first, count)
+        self.finish_client_arrays(vbo)
+
+    def glDrawElements(self):
+        mode, count, typ, indices = self.args(4)
+        isz = {0x1401: 1, 0x1403: 2, 0x1405: 4}.get(typ, 2)
+        ibo = None
+        if not self.bound(GL_ELEMENT_ARRAY_BUFFER_BINDING):
+            data = self.read(indices, count * isz)
+            fmt = {1: 'B', 2: 'H', 4: 'I'}[isz]
+            idxs = struct.unpack(f'<{count}{fmt}', data) if count else ()
+            hi = max(idxs) if idxs else 0
+            vbo = self.upload_client_arrays(0, hi + 1)
+            ibo = ctypes.c_uint()
+            _gl.glGenBuffers(1, ctypes.byref(ibo))
+            _gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
+            _gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, len(data), data, 0x88E0)
+            _gl.glDrawElements(mode, count, typ, None)
+            _gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+            _gl.glDeleteBuffers(1, ctypes.byref(ibo))
+        else:
+            vbo = None
+            if self.attribs:
+                print('[gles] glDrawElements with an index buffer and client arrays: not handled')
+            _gl.glDrawElements(mode, count, typ, ctypes.c_void_p(indices))
+        self.finish_client_arrays(vbo)
+
+    # ------------------------------------------------------------------------ extensions
+    def glDiscardFramebufferEXT(self):
+        target, count, p = self.args(3)
+        att = [self.emu.r32(p + 4 * i) for i in range(count)]
+        att = [0x1800 + (a - 0x8CE0) if False else a for a in att]
+        arr = (ctypes.c_uint * max(count, 1))(*att)
+        f = host('glInvalidateFramebuffer', 'uip')
+        if f:
+            f(target, count, arr)
+
+    def glResolveMultisampleFramebufferAPPLE(self):
+        w, h = self.screen
+        _gl.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600)
+
+    def glMapBufferOES(self):
+        target, access = self.args(2)
+        size = ctypes.c_int()
+        _gl.glGetBufferParameteriv(target, 0x8764, ctypes.byref(size))   # GL_BUFFER_SIZE
+        a = self.alloc(max(size.value, 1))
+        self.mapped[target] = (a, size.value)
+        self.ret(a)
+
+    def glUnmapBufferOES(self):
+        target, = self.args(1)
+        a, size = self.mapped.pop(target, (0, 0))
+        if a:
+            _gl.glBufferSubData(target, 0, size, self.read(a, size))
+            self.emu.unmap(a, size)
+        self.ret(1)
+
+    def glLabelObjectEXT(self): self.ret(0)
+    def glInsertEventMarkerEXT(self): self.ret(0)
+    def glPushGroupMarkerEXT(self): self.ret(0)
+    def glPopGroupMarkerEXT(self): self.ret(0)
+
+
+def bgra_to_rgba(data):
+    b = bytearray(data)
+    b[0::4], b[2::4] = b[2::4], b[0::4]
+    return bytes(b)
+
+
+def fix_shader(src):
+    """Desktop-free GLSL ES 1.00 runs on the host as it is; only a #version line is added when
+    missing, since some drivers default differently."""
+    if not src.lstrip().startswith(b'#version'):
+        src = b'#version 100\n' + src
+    return src
+
+
+# Objective-C methods replaced: symbol -> GLES method name
+OBJC = {
+    '-[EAGLContext initWithAPI:]': 'eagl_init_with_api',
+    '-[EAGLContext initWithAPI:sharegroup:]': 'eagl_init_with_api_sharegroup',
+    '+[EAGLContext setCurrentContext:]': 'eagl_set_current',
+    '+[EAGLContext currentContext]': 'eagl_current',
+    '-[EAGLContext API]': 'eagl_api',
+    '-[EAGLContext sharegroup]': 'eagl_sharegroup',
+    '-[EAGLContext renderbufferStorage:fromDrawable:]': 'eagl_storage_from_drawable',
+    '-[EAGLContext presentRenderbuffer:]': 'eagl_present',
+}
+
+
+def _vector_methods():
+    for n in (1, 2, 3, 4):
+        setattr(GLES, f'glUniform{n}fv', lambda self, n=n: self.uniform_v(f'glUniform{n}fv', n, ctypes.c_float)())
+        setattr(GLES, f'glUniform{n}iv', lambda self, n=n: self.uniform_v(f'glUniform{n}iv', n, ctypes.c_int)())
+        setattr(GLES, f'glVertexAttrib{n}fv', lambda self, n=n: self.attrib_v(n)())
+    for n in (2, 3, 4):
+        setattr(GLES, f'glUniformMatrix{n}fv', lambda self, n=n: self.uniform_v(f'glUniformMatrix{n}fv', n * n, ctypes.c_float, True)())
+
+
+_vector_methods()

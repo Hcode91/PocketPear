@@ -11,6 +11,30 @@ from unicorn.arm_const import *
 
 SVC_BASE = 0x5050       # ARM svc immediates
 THUMB_BASE = 0x40       # Thumb svc immediates (8 bits; the system call itself is 0x80)
+INDEXED_THUMB = 0x7f    # svc #0x7f; bx lr; .word n  -> Python function n
+INDEXED_ARM = 0x507f    # svc #0x507f; bx lr; .word n
+
+
+class Stubs:
+    """Guest functions replaced by Python ones. Each replaced function starts with an svc that
+    lands in call(), a return, and the index of its Python implementation."""
+
+    def __init__(self, emu):
+        self.emu = emu
+        self.funcs = []
+
+    def replace(self, addr, func, thumb):
+        n = len(self.funcs)
+        self.funcs.append(func)
+        if thumb:
+            self.emu.write(addr, struct.pack('<HHI', 0xDF00 | INDEXED_THUMB, 0x4770, n))
+        else:
+            self.emu.write(addr, struct.pack('<III', 0xEF000000 | INDEXED_ARM, 0xE12FFF1E, n))
+        return n
+
+    def call(self, pc, thumb):
+        n = struct.unpack('<I', self.emu.read(pc + (2 if thumb else 4), 4))[0]
+        self.funcs[n]()
 EBUSY, EPERM, ETIMEDOUT, EINVAL, EDEADLK = 16, 1, 60, 22, 11
 FUNCS = ['pthread_mutex_lock', 'pthread_mutex_trylock', 'pthread_mutex_unlock',
          'pthread_cond_wait', 'pthread_cond_wait$NOCANCEL', 'pthread_cond_timedwait',

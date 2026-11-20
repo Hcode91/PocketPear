@@ -128,14 +128,34 @@ class Kernel:
         if uc.reg_read(UC_ARM_REG_CPSR) & 0x20:
             imm = struct.unpack('<H', self.emu.read(pc - 2, 2))[0] & 0xff
             if imm != 0x80:
-                from hle import THUMB_BASE
-                self.emu.hle.call(imm - THUMB_BASE)
+                from hle import THUMB_BASE, INDEXED_THUMB
+                try:
+                    if imm == INDEXED_THUMB:
+                        self.emu.stubs.call(pc, True)
+                    else:
+                        self.emu.hle.call(imm - THUMB_BASE)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    self.emu.backtrace(12)
+                    self.exited = -1
+                    uc.emu_stop()
                 return
         else:
             imm = struct.unpack('<I', self.emu.read(pc - 4, 4))[0] & 0xffffff
             if imm != 0x80:
-                from hle import SVC_BASE
-                self.emu.hle.call(imm - SVC_BASE)
+                from hle import SVC_BASE, INDEXED_ARM
+                try:
+                    if imm == INDEXED_ARM:
+                        self.emu.stubs.call(pc, False)
+                    else:
+                        self.emu.hle.call(imm - SVC_BASE)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    self.emu.backtrace(12)
+                    self.exited = -1
+                    uc.emu_stop()
                 return
         num = uc.reg_read(UC_ARM_REG_R12)
         if num == 0x80000000:

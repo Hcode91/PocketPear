@@ -78,6 +78,7 @@ class Emulator:
         except Exception:
             info = {}
         self.bundle_id = info.get('CFBundleIdentifier')
+        self.info = info
         self.container = os.path.join(os.environ.get('PP_DATA', os.path.expanduser('~/.pocketpear')), name)
         for d in ('Documents', 'Library/Preferences', 'Library/Caches', 'tmp'):
             os.makedirs(os.path.join(self.container, d), exist_ok=True)
@@ -235,10 +236,18 @@ class Emulator:
         for a, n in zip(self.syms.addrs, self.syms.names):
             if '(libsystem_c.dylib)' in n:
                 by_name.setdefault(n.split(' (')[0], a)
-        from hle import Pthreads
+        from hle import Pthreads, Stubs
         self.hle = Pthreads(self)
+        self.stubs = Stubs(self)
         if not os.environ.get('PP_NO_HLE'):
             self.hle.install(by_name)
+        gl_syms = {}
+        for a, n in zip(self.syms.addrs, self.syms.names):
+            if n.endswith(' (OpenGLES)'):
+                gl_syms.setdefault(n[:-len(' (OpenGLES)')], a)
+        from gles import GLES
+        self.gles = GLES(self)
+        self.gles.install(self.stubs, gl_syms)
         print(f'[emu] {len(self.syms.addrs)} symbols')
 
         # commpage
