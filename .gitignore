@@ -1,0 +1,10 @@
+# Never commit Apple firmware, apps or anything taken from them.
+*.ipsw
+*.dmg
+*.img
+*.ipa
+*.app/
+rootfs/
+firmware/
+__pycache__/
+*.log
