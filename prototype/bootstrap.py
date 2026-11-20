@@ -22,6 +22,9 @@ class Bootstrap:
         self.k = kernel
         self.services = {}        # name -> port name in the guest's space
         self.providers = {}       # name -> factory() -> port, for system services we stand in for
+        from services.springboard import Workspace, SystemApp
+        self.providers['PurpleWorkspacePort'] = lambda: Workspace(kernel).port
+        self.providers['PurpleSystemAppPort'] = lambda: SystemApp(kernel).port
 
     def name(self, body, off):
         return body[off:off + 128].split(b'\0')[0].decode('utf-8', 'replace')

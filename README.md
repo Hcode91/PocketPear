@@ -27,7 +27,14 @@ Debugging switches: `TRACE=1` (file system calls), `TRACE_SYS=1` (every call wit
 ## Where it has got to
 
 Wipeout (iOS 6.1.4 rootfs, iPhone5,2): dyld, libSystem, libdispatch (worker threads, kqueue),
-Foundation, CoreFoundation, the app's own initialisers and Mono runtime all run, and it reaches
-`UIApplicationMain`. GraphicsServices checks in its ports with the launchd stand-in. UIKit then
-looks up SpringBoard's `PurpleWorkspacePort`, finds none, and exits cleanly with "Terminating
-since there is no workspace". Next: SpringBoard, backboardd and CARenderServer stand-ins.
+Foundation, CoreFoundation, the app's own initialisers and Mono runtime all run, then
+`UIApplicationMain`: GraphicsServices checks in its ports with the launchd stand-in, UIKit finds
+SpringBoard's workspace and system-app ports (served by `prototype/services/`), and the main
+thread settles in its run loop waiting for events. Next: find what SpringBoard and backboardd
+send a launching app, and a CARenderServer stand-in.
+
+pthread mutexes, condition variables and rwlocks are implemented at the libsystem_c function
+level (`prototype/hle.py`) rather than through the kernel's psynch calls. Threads switch only at
+system calls (and every 512th call), because stopping Unicorn mid-instruction-stream loses the
+Thumb IT-block state; `PP_SLICE=n` forces instruction-count slices anyway, and `PP_WATCHDOG`
+(seconds) reports a thread that never makes a call that waits.

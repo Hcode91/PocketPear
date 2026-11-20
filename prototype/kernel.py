@@ -62,7 +62,7 @@ MACH_NAMES = {3: 'mach_absolute_time', 10: 'mach_vm_allocate', 12: 'mach_vm_deal
               31: 'mach_msg', 32: 'mach_msg_overwrite', 33: 'semaphore_signal', 34: 'semaphore_signal_all', 36: 'semaphore_wait',
               37: 'semaphore_wait_signal', 38: 'semaphore_timedwait', 39: 'semaphore_timedwait_signal', 89: 'mach_timebase_info',
               90: 'mach_wait_until', 91: 'mk_timer_create', 93: 'mk_timer_arm', 94: 'mk_timer_cancel', 58: 'pid_for_task',
-              59: 'macx_swapon?', 61: 'thread_switch', 62: 'clock_sleep', 24: 'mach_port_construct?'}
+              59: 'swtch_pri', 60: 'swtch', 61: 'thread_switch', 62: 'clock_sleep', 24: 'mach_port_construct?'}
 
 
 class Kernel:
@@ -120,6 +120,19 @@ class Kernel:
             print(f'[kernel] interrupt {intno} at pc={uc.reg_read(UC_ARM_REG_PC):#x}')
             uc.emu_stop()
             return
+        pc = uc.reg_read(UC_ARM_REG_PC)
+        if uc.reg_read(UC_ARM_REG_CPSR) & 0x20:
+            imm = struct.unpack('<H', self.emu.read(pc - 2, 2))[0] & 0xff
+            if imm != 0x80:
+                from hle import THUMB_BASE
+                self.emu.hle.call(imm - THUMB_BASE)
+                return
+        else:
+            imm = struct.unpack('<I', self.emu.read(pc - 4, 4))[0] & 0xffffff
+            if imm != 0x80:
+                from hle import SVC_BASE
+                self.emu.hle.call(imm - SVC_BASE)
+                return
         num = uc.reg_read(UC_ARM_REG_R12)
         if num == 0x80000000:
             self.platform_call()
@@ -127,6 +140,8 @@ class Kernel:
         if num & 0x80000000:
             num -= 1 << 32
         self.calls += 1
+        if self.calls % 512 == 0 and len(self.emu.sched.threads) > 1 and self.emu.sched.cur.ready is None:
+            self._yield_after = True
         if self.emu.trace_sys:
             self._last = (num, [hex(a) for a in self.args(4)])
         try:
@@ -136,6 +151,12 @@ class Kernel:
                 self.mach_trap(-num)
             else:
                 self.indirect()
+            if getattr(self, '_yield_after', False):
+                self._yield_after = False
+                if self.emu.sched.cur.ready is None and not self.emu.sched.cur.dead and self.exited is None:
+                    self.emu.sched.cur.ready = lambda: True
+                    self.emu.sched.cur.why = 'preempted at a system call'
+                    uc.emu_stop()
             if self.emu.trace_sys:
                 n = self._last[0]
                 nm = BSD_NAMES.get(n, '') if n > 0 else MACH_NAMES.get(-n, '')
@@ -451,10 +472,7 @@ class Kernel:
         gfd, buf, n = self.args(3)
         data = self.emu.read(buf, n)
         if gfd in (1, 2):
-            text = data.decode('utf-8', 'replace')
-            for line in text.rstrip('\n').split('\n'):
-                print(f'[guest {"out" if gfd == 1 else "err"}] {line}')
-            self.ret(n); return
+            self.ret(self.write_bytes(gfd, data)); return
         fd = self.hostfd(gfd)
         if fd is None:
             self.ret(EBADF, True); return
@@ -466,6 +484,8 @@ class Kernel:
             text = data.decode('utf-8', 'replace')
             for line in text.rstrip('\n').split('\n'):
                 print(f'[guest {"out" if gfd == 1 else "err"}] {line}')
+            if os.environ.get('BT_ON_TEXT') and os.environ['BT_ON_TEXT'] in text:
+                self.emu.backtrace(30)
             return len(data)
         fd = self.hostfd(gfd)
         if fd is None:
@@ -836,7 +856,20 @@ class Kernel:
         self.mret(0)
     def trap_pid_for_task(self):
         t, p = self.args(2); self.emu.w32(p, 1234); self.mret(0)
-    def trap_thread_switch(self): self.mret(0)
+    def yield_cpu(self):
+        """Let the other threads run: the caller is runnable again straight away, but goes to
+        the back of the round robin. Spin locks call this when they have spun for a while."""
+        self.emu.sched.block('yield', lambda: True, lambda timed_out: self.mret(0))
+
+    def trap_thread_switch(self):
+        thread, option, ms = self.args(3)
+        if option == 2 and ms:            # SWITCH_OPTION_WAIT: sleep for the time given
+            self.emu.sched.block('thread_switch wait', lambda: False, lambda timed_out: self.mret(0), ms / 1000)
+        else:
+            self.yield_cpu()
+
+    def trap_swtch_pri(self): self.yield_cpu()
+    def trap_swtch(self): self.yield_cpu()
     def sem(self, name):
         p = self.pr.get(name)
         if p is None:
@@ -897,7 +930,18 @@ class Kernel:
         msg, option, send_size, rcv_size, rcv_name, timeout, notify = self.args(7)
         if option & MACH_SEND_MSG:
             remote = self.emu.r32(msg + 8)
-            if self.pr.can_queue(remote):
+            server = getattr(self.pr.get(remote), 'server', None)
+            if server is not None:
+                from services.base import Request
+                req = Request(self.emu.read(msg, send_size))
+                for r in server.handle(req):
+                    dest = struct.unpack_from('<I', r, 12)[0]
+                    if self.pr.get(dest) is not None:
+                        self.pr.get(dest).queue.append((r, [], server.token))
+                if not option & MACH_RCV_MSG:
+                    self.mret(0)
+                    return
+            elif self.pr.can_queue(remote):
                 self.pr.send(msg, send_size)
                 if self.emu.trace:
                     print(f'[ipc] thread {self.cur.tid} sent id {self.emu.r32(msg + 20)} to {remote:#x}')

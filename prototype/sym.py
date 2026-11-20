@@ -6,6 +6,7 @@ import struct
 class Symbols:
     def __init__(self):
         self.addrs, self.names = [], []
+        self.thumb = set()        # addresses of functions defined as Thumb (N_ARM_THUMB_DEF)
 
     def add_macho(self, data, slide=0, file_base=0, image_name=''):
         """data is the whole file (or cache); the header is at file offset 0 for a plain
@@ -25,6 +26,8 @@ class Symbols:
                     end = data.find(b'\0', stroff + strx)
                     name = data[stroff + strx:end].decode('utf-8', 'replace')
                     self.addrs.append(value + slide)
+                    if desc & 0x8:
+                        self.thumb.add(value + slide)
                     self.names.append(name + (f' ({image_name})' if image_name else ''))
             o += size
 

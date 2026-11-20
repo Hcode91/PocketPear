@@ -57,10 +57,12 @@ class MachMsg:
         else:
             h = getattr(self, 'mig_' + name.replace('?', ''), None)
             out = h(body, remote) if h else None
+        from ports import trailer, TOKEN_KERNEL, TOKEN_LAUNCHD
+        token = TOKEN_LAUNCHD if dest == 'bootstrap' else TOKEN_KERNEL
         if isinstance(out, bytearray):     # pre-built complex reply body (after the header)
             if option & MACH_RCV_MSG:
                 header = struct.pack('<6I', 0x80000000 | 0x12, 24 + len(out), 0, local, 0, mid + 100)
-                self.emu.write(msg_p, header + bytes(out))
+                self.emu.write(msg_p, header + bytes(out) + trailer(option, token=token))
             return KERN_SUCCESS
         if out is None:
             # Unknown routine: most kernel MIG calls are setters whose reply is only a return
@@ -78,13 +80,13 @@ class MachMsg:
         if simple:
             reply = NDR + out
             header = struct.pack('<6I', 0x12, 24 + len(reply), 0, local, 0, mid + 100)
-            self.emu.write(msg_p, header + reply)
+            self.emu.write(msg_p, header + reply + trailer(option, token=token))
         else:
             # complex: header, body count, port descriptors, NDR, trailing data
             desc = b''.join(struct.pack('<I', p) + struct.pack('<I', 0) + struct.pack('<HBB', 0, 0x11, 0) for p in ports)
             reply = struct.pack('<I', len(ports)) + desc + (NDR + trailing if trailing else b'')
             header = struct.pack('<6I', 0x80000012, 24 + len(reply), 0, local, 0, mid + 100)
-            self.emu.write(msg_p, header + reply)
+            self.emu.write(msg_p, header + reply + trailer(option, token=token))
         return KERN_SUCCESS
 
     # ---------------------------------------------------------------- host
@@ -168,5 +170,20 @@ class MachMsg:
         which, = struct.unpack_from('<i', body, 8)
         return ([self.k.new_port(f'clock{which}')], None)
     def mig_mach_port_deallocate(self, body, port): return struct.pack('<i', KERN_SUCCESS)
+
+    def mig_mach_port_type(self, body, port):
+        name, = struct.unpack_from('<I', body, 8)
+        p = self.k.pr.get(name)
+        if p is None:
+            return struct.pack('<i', 15)                       # KERN_INVALID_NAME
+        if p.kind in ('receive', 'service-local'):
+            t = 0x30000                                        # receive + send
+        elif p.kind == 'set':
+            t = 0x80000
+        elif p.kind == 'dead':
+            t = 0x100000
+        else:
+            t = 0x10000                                        # send
+        return struct.pack('<iI', KERN_SUCCESS, t)
     def mig_mach_port_request_notification(self, body, port): return ([0], b'')
     def mig_mach_port_set_attributes(self, body, port): return struct.pack('<i', KERN_SUCCESS)

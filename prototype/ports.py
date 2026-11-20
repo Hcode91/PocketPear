@@ -20,6 +20,21 @@ MACH_MSGH_BITS_COMPLEX = 0x80000000
 RECEIVED = {16: 16, 17: 17, 18: 18, 19: 17, 20: 17, 21: 18}   # MOVE_RECEIVE, MOVE_SEND, MOVE_SEND_ONCE, COPY_SEND, MAKE_SEND, MAKE_SEND_ONCE
 TRAILER_SIZES = {0: 8, 1: 12, 2: 20, 3: 52, 4: 56, 5: 60, 6: 68, 7: 68}
 
+# audit tokens: auid, euid, egid, ruid, rgid, pid, asid, pidversion
+TOKEN_KERNEL = (0, 0, 0, 0, 0, 0, 0, 0)
+TOKEN_LAUNCHD = (0xffffffff, 0, 0, 0, 0, 1, 100000, 0)
+TOKEN_SYSTEM = (0xffffffff, 501, 501, 501, 501, 50, 100000, 0)     # a system daemon (mobile)
+TOKEN_APP = (501, 501, 501, 501, 501, 1234, 100000, 0)
+
+
+def trailer(option, seqno=0, token=TOKEN_KERNEL):
+    """The trailer the receive option asks for: type 0, size, seqno, security token (uid, gid),
+    audit token, then zeros for the context and labels."""
+    size = TRAILER_SIZES.get((option >> 24) & 0xf, 8)
+    t = struct.pack('<III', 0, size, seqno) + struct.pack('<II', token[1], token[2]) + struct.pack('<8I', *token)
+    t += bytes(max(0, size - len(t)))
+    return t[:size]
+
 
 class Port:
     def __init__(self, name, kind):
@@ -31,6 +46,8 @@ class Port:
         self.context = 0
         self.value = 0            # semaphore count
         self.dead = False
+        self.server = None        # a services.base.MigServer answering messages sent here
+        self.label = ''
 
     def __repr__(self):
         return f'{self.kind}:{self.name:#x}'
@@ -114,16 +131,15 @@ class Ports:
         new_bits = (bits & MACH_MSGH_BITS_COMPLEX) | RECEIVED.get(ldisp, 0) | (RECEIVED.get(rdisp, rdisp) << 8)
         # The receiver sees the reply port as remote and its own port as local.
         struct.pack_into('<6I', raw, 0, new_bits, size_, local, remote, 0, mid)
-        dest.queue.append((bytes(raw), ool))
+        dest.queue.append((bytes(raw), ool, TOKEN_APP))
 
     def deliver(self, port, buf_p, buf_size, option):
         """Write the first message on port into the receive buffer. Returns a kern_return."""
-        raw, ool = port.queue[0]
-        trailer = TRAILER_SIZES.get((option >> 24) & 0xf, 8)
-        if len(raw) + trailer > buf_size:
+        raw, ool, token = port.queue[0]
+        tr = trailer(option, token=token)
+        if len(raw) + len(tr) > buf_size:
             if option & MACH_RCV_LARGE:
-                struct.pack_into('<I', bytearray(4), 0, 0)
-                self.emu.w32(buf_p + 4, len(raw) + trailer)
+                self.emu.w32(buf_p + 4, len(raw) + len(tr))
                 return MACH_RCV_TOO_LARGE
             port.queue.pop(0)
             return MACH_RCV_TOO_LARGE
@@ -138,5 +154,5 @@ class Ports:
                 a = 0
             struct.pack_into('<I', raw, off, a)
         self.emu.write(buf_p, raw)
-        self.emu.write(buf_p + len(raw), struct.pack('<II', 0, trailer) + bytes(trailer - 8))
+        self.emu.write(buf_p + len(raw), tr)
         return 0

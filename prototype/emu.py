@@ -215,6 +215,14 @@ class Emulator:
         self.syms.add_macho(exe.data, image_name='app')
         self.syms.add_macho(dyld.data, image_name='dyld')
         self.syms.finish()
+        by_name = {}
+        for a, n in zip(self.syms.addrs, self.syms.names):
+            if '(libsystem_c.dylib)' in n:
+                by_name.setdefault(n.split(' (')[0], a)
+        from hle import Pthreads
+        self.hle = Pthreads(self)
+        if not os.environ.get('PP_NO_HLE'):
+            self.hle.install(by_name)
         print(f'[emu] {len(self.syms.addrs)} symbols')
 
         # commpage
@@ -371,7 +379,7 @@ class Emulator:
         tail = int(os.environ.get('BT_TAIL', 16))
         shown = frames if len(frames) <= limit + tail else frames[:limit] + [None] + frames[-tail:]
         for a in shown:
-            print('   ', '...' if a is None else self.syms.name(a))
+            print('   ', '...' if a is None else f'{a:#010x} {self.syms.name(a)}')
 
     def run(self, max_insns=0, slice_insns=int(os.environ.get("PP_SLICE", 0))):
         from sched import Scheduler, Thread
@@ -380,6 +388,7 @@ class Emulator:
         main = Thread(self.uc.context_save(), 'main', self.kernel.thread_port)
         self.sched.add(main)
         t0 = time.time()
+        last_beat = t0
         executed = 0
         while self.kernel.exited is None:
             t, state = self.sched.pick()
@@ -396,7 +405,17 @@ class Emulator:
             pc = self.uc.reg_read(UC_ARM_REG_PC)
             thumb = (self.uc.reg_read(UC_ARM_REG_CPSR) >> 5) & 1
             try:
-                self.uc.emu_start(pc | thumb, 0xffffffff, count=slice_insns)
+                started = time.time()
+                self.uc.emu_start(pc | thumb, 0xffffffff, count=slice_insns,
+                                  timeout=0 if slice_insns else int(float(os.environ.get('PP_WATCHDOG', 20)) * 1e6))
+                if not slice_insns and t.ready is None and not t.dead and self.kernel.exited is None \
+                        and time.time() - started >= float(os.environ.get('PP_WATCHDOG', 20)) * 0.95:
+                    print(f'[emu] thread {t.tid} ({t.name}) ran {time.time() - started:.0f}s without a system call that waits:')
+                    self.describe_pc()
+                    self.backtrace()
+                    for th in self.sched.threads:
+                        print('     ', th)
+                    break
             except UcError as e:
                 regs = {n: self.uc.reg_read(r) for n, r in [('pc', UC_ARM_REG_PC), ('lr', UC_ARM_REG_LR), ('sp', UC_ARM_REG_SP),
                         ('r0', UC_ARM_REG_R0), ('r1', UC_ARM_REG_R1), ('r2', UC_ARM_REG_R2), ('r3', UC_ARM_REG_R3), ('r12', UC_ARM_REG_R12)]}
@@ -405,6 +424,14 @@ class Emulator:
                 self.backtrace()
                 break
             t.ctx = self.uc.context_save()
+            t.pc = self.uc.reg_read(UC_ARM_REG_PC)
+            if time.time() - last_beat > float(os.environ.get('PP_HEARTBEAT', 15)):
+                last_beat = time.time()
+                from sched import CLOCK
+                print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls')
+                for th in self.sched.threads:
+                    if not th.dead:
+                        print(f'      {th} at {self.syms.name(getattr(th, "pc", 0))}')
             from sched import CLOCK
             CLOCK.tick(0.0005)
             executed += slice_insns
