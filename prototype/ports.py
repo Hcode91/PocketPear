@@ -47,6 +47,7 @@ class Port:
         self.value = 0            # semaphore count
         self.dead = False
         self.server = None        # a services.base.MigServer answering messages sent here
+        self.timer_deadline = None  # an armed mk_timer's expiry, in guest seconds
         self.label = ''
 
     def __repr__(self):
@@ -84,6 +85,15 @@ class Ports:
         if set_name and set_name in self.by_name:
             self.by_name[set_name].members.add(member)
 
+    def fire_timer(self, p):
+        """An armed mk_timer whose time has come queues its expiry message."""
+        if p.timer_deadline is not None:
+            from sched import CLOCK
+            if CLOCK.now() >= p.timer_deadline:
+                p.timer_deadline = None
+                msg = struct.pack('<6I', 0x12, 48, 0, p.name, 0, 0) + bytes(24)
+                p.queue.append((msg, [], TOKEN_KERNEL))
+
     def pending(self, name):
         """The port (itself or a set member) with a message waiting, or None."""
         p = self.by_name.get(name)
@@ -92,10 +102,22 @@ class Ports:
         if p.kind == 'set':
             for m in sorted(p.members):
                 q = self.by_name.get(m)
-                if q and q.queue:
-                    return q
+                if q:
+                    self.fire_timer(q)
+                    if q.queue:
+                        return q
             return None
+        self.fire_timer(p)
         return p if p.queue else None
+
+    def next_timer(self, name):
+        """The earliest armed timer deadline among a port or a set's members."""
+        p = self.by_name.get(name)
+        if not p:
+            return None
+        ports = [self.by_name.get(m) for m in p.members] if p.kind == 'set' else [p]
+        ds = [q.timer_deadline for q in ports if q is not None and q.timer_deadline is not None]
+        return min(ds) if ds else None
 
     # ------------------------------------------------------------ send / receive
     def can_queue(self, name):

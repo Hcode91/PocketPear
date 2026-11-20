@@ -25,7 +25,7 @@ NAMES = {200: 'host_info', 201: 'host_kernel_version', 202: 'host_page_size', 20
 import json, os
 _MIG = {int(k): v for k, v in json.load(open(os.path.join(os.path.dirname(__file__), 'migids.json'))).items()}
 for _k, _v in _MIG.items():
-    NAMES.setdefault(_k, _v)
+    NAMES.setdefault(_k, _v[len('_kernelrpc_'):] if _v.startswith('_kernelrpc_') else _v)
 
 
 class MachMsg:
@@ -170,6 +170,21 @@ class MachMsg:
         which, = struct.unpack_from('<i', body, 8)
         return ([self.k.new_port(f'clock{which}')], None)
     def mig_mach_port_deallocate(self, body, port): return struct.pack('<i', KERN_SUCCESS)
+
+    def mig_mach_port_set_context(self, body, port):
+        name, ctx = struct.unpack_from('<IQ', body, 8)
+        p = self.k.pr.get(name)
+        if p is None:
+            return struct.pack('<i', 15)
+        p.context = ctx
+        return struct.pack('<i', KERN_SUCCESS)
+
+    def mig_mach_port_get_context(self, body, port):
+        name, = struct.unpack_from('<I', body, 8)
+        p = self.k.pr.get(name)
+        if p is None:
+            return struct.pack('<i', 15)
+        return struct.pack('<iQ', KERN_SUCCESS, p.context)
 
     def mig_mach_port_type(self, body, port):
         name, = struct.unpack_from('<I', body, 8)

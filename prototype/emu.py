@@ -72,6 +72,12 @@ class Emulator:
         self.app_guest = CONTAINER + '/' + os.path.basename(self.app_dir)
         # The app's data container: Documents, Library and tmp live on the host, per app.
         name = os.path.basename(self.app_dir).rsplit('.', 1)[0]
+        import plistlib
+        try:
+            info = plistlib.load(open(os.path.join(self.app_dir, 'Info.plist'), 'rb'))
+        except Exception:
+            info = {}
+        self.bundle_id = info.get('CFBundleIdentifier')
         self.container = os.path.join(os.environ.get('PP_DATA', os.path.expanduser('~/.pocketpear')), name)
         for d in ('Documents', 'Library/Preferences', 'Library/Caches', 'tmp'):
             os.makedirs(os.path.join(self.container, d), exist_ok=True)
@@ -337,6 +343,17 @@ class Emulator:
             pass
         return f'<{a:#x}>'
 
+    def stack_strings(self, span=0x400):
+        """Printable strings near the stack pointer: crash messages are often built there."""
+        import re
+        sp = self.uc.reg_read(UC_ARM_REG_SP)
+        try:
+            blob = self.read(sp, span)
+        except Exception:
+            return
+        for m in re.finditer(rb'[\x20-\x7e]{12,}', blob):
+            print(f'[emu] stack +{m.start():#x}: {m.group().decode()}')
+
     def describe_pc(self):
         from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
         pc = self.uc.reg_read(UC_ARM_REG_PC)
@@ -421,6 +438,7 @@ class Emulator:
                         ('r0', UC_ARM_REG_R0), ('r1', UC_ARM_REG_R1), ('r2', UC_ARM_REG_R2), ('r3', UC_ARM_REG_R3), ('r12', UC_ARM_REG_R12)]}
                 print(f'[emu] thread {t.tid} ({t.name}) stopped:', e, ' '.join(f'{k}={v:#x}' for k, v in regs.items()))
                 self.describe_pc()
+                self.stack_strings()
                 self.backtrace()
                 break
             t.ctx = self.uc.context_save()

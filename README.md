@@ -26,12 +26,13 @@ Debugging switches: `TRACE=1` (file system calls), `TRACE_SYS=1` (every call wit
 
 ## Where it has got to
 
-Wipeout (iOS 6.1.4 rootfs, iPhone5,2): dyld, libSystem, libdispatch (worker threads, kqueue),
-Foundation, CoreFoundation, the app's own initialisers and Mono runtime all run, then
-`UIApplicationMain`: GraphicsServices checks in its ports with the launchd stand-in, UIKit finds
-SpringBoard's workspace and system-app ports (served by `prototype/services/`), and the main
-thread settles in its run loop waiting for events. Next: find what SpringBoard and backboardd
-send a launching app, and a CARenderServer stand-in.
+Wipeout (iOS 6.1.4 rootfs, iPhone5,2) now launches like on a device: dyld, libSystem,
+libdispatch, Foundation and the app's initialisers run, `UIApplicationMain` checks in its ports,
+the backboard stand-in sends the GraphicsServices application-launch event (type 2000), UIKit
+registers a render context with the CARenderServer stand-in, the app delegate's
+`applicationDidFinishLaunching` runs, preferences are saved in the container, and the game's
+Mono runtime starts loading `Data/Managed`. Core Animation commits arrive at the render server
+stand-in but are not drawn yet.
 
 pthread mutexes, condition variables and rwlocks are implemented at the libsystem_c function
 level (`prototype/hle.py`) rather than through the kernel's psynch calls. Threads switch only at

@@ -61,7 +61,7 @@ MACH_NAMES = {3: 'mach_absolute_time', 10: 'mach_vm_allocate', 12: 'mach_vm_deal
               23: 'mach_port_extract_member', 26: 'mach_reply_port', 27: 'thread_self', 28: 'task_self', 29: 'host_self',
               31: 'mach_msg', 32: 'mach_msg_overwrite', 33: 'semaphore_signal', 34: 'semaphore_signal_all', 36: 'semaphore_wait',
               37: 'semaphore_wait_signal', 38: 'semaphore_timedwait', 39: 'semaphore_timedwait_signal', 89: 'mach_timebase_info',
-              90: 'mach_wait_until', 91: 'mk_timer_create', 93: 'mk_timer_arm', 94: 'mk_timer_cancel', 58: 'pid_for_task',
+              90: 'mach_wait_until', 91: 'mk_timer_create', 92: 'mk_timer_destroy', 93: 'mk_timer_arm', 94: 'mk_timer_cancel', 58: 'pid_for_task',
               59: 'swtch_pri', 60: 'swtch', 61: 'thread_switch', 62: 'clock_sleep', 24: 'mach_port_construct?'}
 
 
@@ -84,6 +84,8 @@ class Kernel:
         kqueue.install(Kernel)
         from bootstrap import Bootstrap
         self.bootstrap = Bootstrap(self)
+        from services.backboard import Launcher
+        self.launcher = Launcher(self)
         from mach import MachMsg
         self.mach = MachMsg(self)
 
@@ -399,6 +401,66 @@ class Kernel:
     def guest_path(self, p):
         return self.emu.cstr(p)
 
+    @staticmethod
+    def writable(path):
+        """The app may change files only in its container and the temporary directories."""
+        return path.startswith('/var/mobile/Applications/') or path.startswith('/tmp') or path.startswith('/private/var/tmp')
+
+    def path_call(self, n=1):
+        """Guest paths of the first n arguments, and their host paths; None if one may not change."""
+        args = self.args(n)
+        guest = [self.guest_path(a) for a in args]
+        if not all(self.writable(g) for g in guest):
+            self.log(f'refused to change {guest}')
+            self.ret(1, True)            # EPERM
+            return None
+        return guest, [self.emu.host_path(g) for g in guest]
+
+    def sys_unlink(self):
+        r = self.path_call(1)
+        if r:
+            os.unlink(r[1][0]); self.log(f'unlink({r[0][0]!r})'); self.ret(0)
+
+    def sys_rename(self):
+        r = self.path_call(2)
+        if r:
+            os.replace(r[1][0], r[1][1]); self.log(f'rename({r[0][0]!r}, {r[0][1]!r})'); self.ret(0)
+
+    def sys_mkdir(self):
+        path_p, mode = self.args(2)
+        g = self.guest_path(path_p)
+        if not self.writable(g):
+            self.ret(1, True); return
+        os.mkdir(self.emu.host_path(g), 0o755); self.log(f'mkdir({g!r})'); self.ret(0)
+
+    def sys_rmdir(self):
+        r = self.path_call(1)
+        if r:
+            os.rmdir(r[1][0]); self.ret(0)
+
+    def sys_fsync(self):
+        fd = self.hostfd(self.args(1)[0])
+        if fd is None:
+            self.ret(EBADF, True); return
+        self.ret(0)
+    sys_fsync_nocancel = sys_fsync
+    sys_fdatasync = sys_fsync
+
+    def sys_ftruncate(self):
+        gfd = self.args(1)[0]
+        length = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)
+        fd = self.hostfd(gfd)
+        if fd is None:
+            self.ret(EBADF, True); return
+        os.ftruncate(fd, length); self.ret(0)
+
+    def sys_chmod(self): self.ret(0)
+    def sys_fchmod(self): self.ret(0)
+    def sys_chown(self): self.ret(0)
+    def sys_fchown(self): self.ret(0)
+    def sys_utimes(self): self.ret(0)
+    def sys_futimes(self): self.ret(0)
+
     def sys_open(self):
         path_p, flags, mode = self.args(3)
         path = self.guest_path(path_p)
@@ -699,7 +761,29 @@ class Kernel:
             return table[key]
         if mib[0] == NAMED_MIB:
             return NAMED_SYSCTL[list(NAMED_SYSCTL)[mib[1]]]
+        if len(mib) >= 5 and mib[0] == 4 and mib[1] == 17 and mib[4] in (3, 2):   # CTL_NET, PF_ROUTE, NET_RT_IFLIST
+            return self.interface_list(mib[5] if len(mib) > 5 else 0)
         return None
+
+    # The device's network interfaces: lo0 and en0 (Wi-Fi) with a fixed, locally administered
+    # hardware address, as the routing socket lists them (an RTM_IFINFO message each).
+    INTERFACES = [(1, 'lo0', 24, b''), (2, 'en0', 6, bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]))]
+
+    def interface_list(self, only_index=0):
+        out = b''
+        for index, name, iftype, mac in self.INTERFACES:
+            if only_index and index != only_index:
+                continue
+            nm = name.encode()
+            sdl = struct.pack('<BBHBBBB', 0, 18, index, iftype, len(nm), len(mac), 0) + nm + mac
+            sdl = sdl.ljust(max(20, (len(sdl) + 3) & ~3), b'\0')
+            sdl = bytes([len(sdl)]) + sdl[1:]
+            if_data = struct.pack('<8B', iftype, 0, 0, len(mac), 14 if mac else 0, 0, 0, 0) + struct.pack('<16I', 1500 if mac else 16384, *([0] * 15)) + bytes(8) + bytes(16)
+            flags = 0x8863 if mac else 0x8049          # UP|BROADCAST|RUNNING|SIMPLEX|MULTICAST, or UP|LOOPBACK|RUNNING|MULTICAST
+            hdr_len = 16 + len(if_data)
+            msg = struct.pack('<HBBiiHH', hdr_len + len(sdl), 5, 0xe, 0x10, flags, index, 0) + if_data + sdl
+            out += msg
+        return out
 
     # ------------------------------------------------------------ file systems and directories
     def statfs_bytes(self):
@@ -921,9 +1005,28 @@ class Kernel:
         self.sem(signal).value += 1
         self.wait_on(self.sem(wait), sec + nsec / 1e9)
 
-    def trap_mk_timer_create(self): self.mret(self.new_port('timer'))
-    def trap_mk_timer_arm(self): self.mret(0)
-    def trap_mk_timer_cancel(self): self.mret(0)
+    def trap_mk_timer_create(self): self.mret(self.new_port('receive'))
+
+    def trap_mk_timer_destroy(self): self.mret(0)
+
+    def trap_mk_timer_arm(self):
+        name = self.uc.reg_read(UC_ARM_REG_R0)
+        expire = self.uc.reg_read(UC_ARM_REG_R2) | (self.uc.reg_read(UC_ARM_REG_R3) << 32)   # uint64 in r2:r3
+        p = self.pr.get(name)
+        if p is None:
+            self.mret(15); return
+        p.timer_deadline = expire / 24_000_000
+        self.mret(0)
+
+    def trap_mk_timer_cancel(self):
+        name, result_p = self.args(2)
+        p = self.pr.get(name)
+        if p is not None:
+            if result_p:
+                d = p.timer_deadline or 0
+                self.emu.write(result_p, struct.pack('<Q', int(d * 24_000_000)))
+            p.timer_deadline = None
+        self.mret(0)
 
     def trap_mach_msg(self):
         from ports import MACH_SEND_MSG, MACH_RCV_MSG, MACH_RCV_TIMEOUT, MACH_RCV_TIMED_OUT, MACH_RCV_INVALID_NAME
@@ -935,9 +1038,13 @@ class Kernel:
                 from services.base import Request
                 req = Request(self.emu.read(msg, send_size))
                 for r in server.handle(req):
+                    if isinstance(r, tuple):
+                        r, ool = r
+                    else:
+                        ool = []
                     dest = struct.unpack_from('<I', r, 12)[0]
                     if self.pr.get(dest) is not None:
-                        self.pr.get(dest).queue.append((r, [], server.token))
+                        self.pr.get(dest).queue.append((r, ool, server.token))
                 if not option & MACH_RCV_MSG:
                     self.mret(0)
                     return
@@ -957,6 +1064,7 @@ class Kernel:
         if self.pr.get(rcv_name) is None:
             self.mret(MACH_RCV_INVALID_NAME)
             return
+        self.launcher.before_receive(rcv_name)
         ready = self.pr.pending(rcv_name)
         if ready:
             self.mret(self.pr.deliver(ready, msg, rcv_size, option))
@@ -965,10 +1073,23 @@ class Kernel:
         if limit == 0:
             self.mret(MACH_RCV_TIMED_OUT)
             return
+        from sched import CLOCK
+        end = CLOCK.now() + limit if limit is not None else None
+
+        def wait():
+            # Wake for a message, the receive timeout, or the next armed timer among the ports.
+            cands = [x for x in (end, self.pr.next_timer(rcv_name)) if x is not None]
+            when = min(cands) if cands else None
+            self.emu.sched.block(f'mach_msg receive on {rcv_name:#x}', lambda: self.pr.pending(rcv_name) is not None,
+                                 complete, None if when is None else max(0.0, when - CLOCK.now()))
+
         def complete(timed_out):
-            if timed_out:
+            ready = self.pr.pending(rcv_name)
+            if ready is not None:
+                self.mret(self.pr.deliver(ready, msg, rcv_size, option))
+            elif end is not None and CLOCK.now() >= end:
                 self.mret(MACH_RCV_TIMED_OUT)
             else:
-                self.mret(self.pr.deliver(self.pr.pending(rcv_name), msg, rcv_size, option))
-        self.emu.sched.block(f'mach_msg receive on {rcv_name:#x}', lambda: self.pr.pending(rcv_name) is not None, complete, limit)
+                wait()
+        wait()
     trap_mach_msg_overwrite = trap_mach_msg

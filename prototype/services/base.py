@@ -44,15 +44,20 @@ class MigServer:
         self.seen = {}
 
     # ------------------------------------------------------------ replies
-    def reply(self, req, data=b'', ports=(), ret=None):
-        """A MIG reply: header, [port descriptors], NDR, [return code], data."""
+    def reply(self, req, data=b'', ports=(), ret=None, ool=()):
+        """A MIG reply: header, [port and out-of-line descriptors], NDR, [return code], data.
+        ool items are bytes; they are copied into the receiver's memory on delivery."""
         body = b''
-        bits = 0x12                      # the receiver holds a send-once right to... (MOVE_SEND_ONCE as remote)
-        if ports:
+        bits = 0x12
+        self._pending_ool = []
+        if ports or ool:
             bits |= COMPLEX
-            body += struct.pack('<I', len(ports))
+            body += struct.pack('<I', len(ports) + len(ool))
             for p, disp in ports:
                 body += struct.pack('<IIHBB', p, 0, 0, disp, 0)
+            for blob in ool:
+                self._pending_ool.append((24 + len(body), blob))
+                body += struct.pack('<IIBBBB', 0, len(blob), 1, 0, 0, 1)   # address, size, deallocate, copy, pad, type=OOL
         body += NDR
         if ret is not None:
             body += struct.pack('<i', ret)
@@ -76,6 +81,11 @@ class MigServer:
         if out is None:
             return []
         return out if isinstance(out, list) else [out]
+
+    def take_ool(self):
+        """The out-of-line blobs of the reply built last, as (offset, bytes) for delivery."""
+        o, self._pending_ool = getattr(self, '_pending_ool', []), []
+        return o
 
     def default(self, req):
         return self.error(req, MIG_BAD_ID)

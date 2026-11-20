@@ -25,6 +25,8 @@ class Bootstrap:
         from services.springboard import Workspace, SystemApp
         self.providers['PurpleWorkspacePort'] = lambda: Workspace(kernel).port
         self.providers['PurpleSystemAppPort'] = lambda: SystemApp(kernel).port
+        from services.carender import RenderServer
+        self.providers['com.apple.CARenderServer'] = lambda: RenderServer(kernel).port
 
     def name(self, body, off):
         return body[off:off + 128].split(b'\0')[0].decode('utf-8', 'replace')
@@ -39,12 +41,14 @@ class Bootstrap:
                 self.k.pr.get(p).label = name
                 self.services[name] = p
             print(f'[launchd] check-in {name!r} -> {p:#x}')
+            self.k.launcher.note_check_in(name, p)
             return port_reply(p, MOVE_RECEIVE)
         if mid == 403:                          # bootstrap_register
             port, = struct.unpack_from('<I', body, 4)
             name = self.name(body, 24)
             self.services[name] = port
             print(f'[launchd] register {name!r} -> {port:#x}')
+            self.k.launcher.note_check_in(name, port, replace=True)
             return struct.pack('<i', 0)
         if mid == 404:                          # bootstrap_look_up
             name = self.name(body, 8)

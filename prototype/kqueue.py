@@ -39,7 +39,9 @@ class KQueue:
             if not flags & EV_ADD:
                 return 2
             kn = self.notes[key] = Knote(ident, filt)
-        kn.flags = flags & (EV_ONESHOT | EV_CLEAR | EV_DISPATCH)
+            # EV_ONESHOT, EV_CLEAR and EV_DISPATCH are fixed when the note is added; later
+            # changes (a NOTE_TRIGGER, say) do not repeat them and must not remove them.
+            kn.flags = flags & (EV_ONESHOT | EV_CLEAR | EV_DISPATCH)
         kn.udata = udata
         kn.ext = list(ext)
         if flags & EV_ENABLE or flags & EV_ADD:
@@ -129,6 +131,8 @@ class KQueue:
                 ext = [kn.ext[0], size]
                 data = size
             out.append((kn.ident, kn.filter, kn.flags, fflags, data, kn.udata, ext))
+            if self.k.emu.trace_sys:
+                print(f'[kq] event filter {kn.filter} ident {kn.ident:#x} flags {kn.flags:#x} fflags {fflags:#x} data {data} interval {kn.interval}')
             if kn.filter == EVFILT_TIMER:
                 if kn.interval:
                     kn.deadline += kn.interval * data

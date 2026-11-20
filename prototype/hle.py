@@ -82,12 +82,20 @@ class Pthreads:
             m = self.mutexes[a] = Mutex()
         return m
 
-    def recursive(self, a):
+    def mutex_type(self, a):
+        """0 normal, 1 error-checking, 2 recursive: bits 2-3 of the options word."""
         try:
             sig, _, opts = struct.unpack('<III', self.emu.read(a, 12))
         except Exception:
-            return False
-        return ((opts >> 2) & 3) == 2
+            return 0
+        if sig == 0x32AAABA2:                     # PTHREAD_RECURSIVE_MUTEX_INITIALIZER
+            return 2
+        if sig == 0x32AAABA1:                     # PTHREAD_ERRORCHECK_MUTEX_INITIALIZER
+            return 1
+        return (opts >> 2) & 3
+
+    def recursive(self, a):
+        return self.mutex_type(a) == 2
 
     # ------------------------------------------------------------ mutexes
     def take(self, m):
@@ -100,9 +108,11 @@ class Pthreads:
         if m.owner is None:
             self.take(m); self.ret(0); return
         if m.owner == me:
-            if self.recursive(a):
+            kind = self.mutex_type(a)
+            if kind == 2:                         # recursive
                 m.count += 1; self.ret(0); return
-            print(f'[hle] thread {me} locks mutex {a:#x} it already holds')
+            if kind != 1:                         # a normal mutex would deadlock here
+                print(f'[hle] thread {me} relocks normal mutex {a:#x}; answering EDEADLK')
             self.ret(EDEADLK); return
 
         def complete(timed_out):
