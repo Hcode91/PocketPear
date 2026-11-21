@@ -7,6 +7,7 @@ class Symbols:
     def __init__(self):
         self.addrs, self.names = [], []
         self.thumb = set()        # addresses of functions defined as Thumb (N_ARM_THUMB_DEF)
+        self.defined = set()      # every name an image defines, aliases (N_INDR) included
 
     def add_macho(self, data, slide=0, file_base=0, image_name=''):
         """data is the whole file (or cache); the header is at file offset 0 for a plain
@@ -21,10 +22,13 @@ class Symbols:
                 symoff, nsyms, stroff, strsize = struct.unpack_from('<4I', data, o + 8)
                 for i in range(nsyms):
                     strx, ntype, sect, desc, value = struct.unpack_from('<IBBhI', data, symoff + 12 * i)
-                    if ntype & 0xe0 or (ntype & 0x0e) != 0x0e or not value:
+                    if ntype & 0xe0 or (ntype & 0x0e) not in (0x0e, 0x0a, 0x02):
                         continue
                     end = data.find(b'\0', stroff + strx)
                     name = data[stroff + strx:end].decode('utf-8', 'replace')
+                    self.defined.add(name)
+                    if (ntype & 0x0e) != 0x0e or not value:
+                        continue
                     self.addrs.append(value + slide)
                     if desc & 0x8:
                         self.thumb.add(value + slide)

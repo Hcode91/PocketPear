@@ -253,6 +253,7 @@ class Emulator:
         self.syms = Symbols()
         with open(cache_path, 'rb') as f:
             self.syms.add_cache(f.read())
+        system_defined = set(self.syms.defined)
         self.syms.add_macho(exe.data, image_name='app')
         self.syms.add_macho(dyld.data, image_name='dyld')
         self.syms.finish()
@@ -278,6 +279,9 @@ class Emulator:
         self.displaylinks = DisplayLinks(self)
         if not os.environ.get('PP_NO_DISPLAYLINK'):
             self.displaylinks.install(self.stubs)
+        from imports import MissingImports
+        self.missing_imports = MissingImports(self)
+        self.missing_imports.install(exe, system_defined)
         from audio import AudioQueues
         self.audio = AudioQueues(self)
         self.audio.install(self.stubs)
@@ -461,9 +465,16 @@ class Emulator:
             print(f'[emu] stack +{m.start():#x}: {m.group().decode()}')
 
     def describe_pc(self):
-        from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
         pc = self.uc.reg_read(UC_ARM_REG_PC)
         thumb = bool(self.uc.reg_read(UC_ARM_REG_CPSR) & 0x20)
+        try:
+            from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
+        except ImportError:                     # the Android build has no disassembler
+            try:
+                print(f'[emu] at {self.syms.name(pc)} ({"Thumb" if thumb else "ARM"}): {self.read(pc, 8).hex(" ")}')
+            except Exception:
+                pass
+            return
         md = Cs(CS_ARCH_ARM, CS_MODE_THUMB if thumb else CS_MODE_ARM)
         try:
             code = self.read(pc, 16)
