@@ -51,15 +51,16 @@ class MainActivity : Activity() {
         status = TextView(this).apply { setTextColor(Color.WHITE) }
         root.addView(status)
 
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        // stacked, full width: side by side, a long label pushes the other button off screen
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         buttons.addView(Button(this).apply {
-            text = "Import firmware (.dmg, .zip or split parts)"
+            text = "Import firmware"
             setOnClickListener { pick(REQ_FIRMWARE) }
-        })
+        }, LinearLayout.LayoutParams(-1, -2))
         buttons.addView(Button(this).apply {
             text = "Import game (.ipa)"
             setOnClickListener { pick(REQ_IPA) }
-        })
+        }, LinearLayout.LayoutParams(-1, -2))
         root.addView(buttons)
 
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -73,7 +74,7 @@ class MainActivity : Activity() {
     private fun refresh() {
         val ready = py.callAttr("firmware_ready", filesDir.absolutePath).toBoolean()
         status.text = if (ready) "Firmware: ready (iPhone 5, iOS 6)" else
-            "Firmware: not imported. Import a .zip of an iPhone 5 iOS 6 root filesystem first."
+            "Firmware: not imported. Import the iPhone 5 iOS 6 firmware first: the .dmg, a .zip of it, or all its split parts (.001, .002, ...) picked together."
         list.removeAllViews()
         val apps = JSONArray(py.callAttr("list_apps", filesDir.absolutePath).toString())
         if (apps.length() == 0) {
