@@ -19,10 +19,17 @@ _emu = None
 _log = None
 
 
-def setup(files_dir, native_dir, cache_dir):
+def setup(files_dir, native_dir, cache_dir, data_dir=None):
+    """data_dir is where games keep their Documents, Library and tmp: a folder the player
+    can see (Internal storage/PocketPear/data) when the app has all-files access, else the
+    app's private storage."""
     os.environ['HOME'] = files_dir
     os.environ['TMPDIR'] = cache_dir
-    os.environ['PP_DATA'] = os.path.join(files_dir, 'data')
+    private = os.path.join(files_dir, 'data')
+    data_dir = data_dir or private
+    os.environ['PP_DATA'] = data_dir
+    if os.path.realpath(data_dir) != os.path.realpath(private):
+        _move_data(private, data_dir)
     os.environ['PP_FRAMES'] = ''
     os.environ['LIBUNICORN_PATH'] = native_dir
     os.environ['LIBPPCPU_PATH'] = os.path.join(native_dir, 'libppcpu.so')
@@ -199,6 +206,34 @@ def list_apps(files_dir):
 
 def remove_app(path):
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _move_data(src, dest):
+    """Move game data kept in private storage before the visible folder existed. A game that
+    already has a folder at dest keeps it; its private copy is left where it was."""
+    try:
+        os.makedirs(dest, exist_ok=True)
+        top = os.path.dirname(dest.rstrip('/'))
+        if not os.path.exists(os.path.join(top, '.nomedia')):
+            open(os.path.join(top, '.nomedia'), 'w').close()   # keep game images out of the gallery
+        if not os.path.isdir(src):
+            return
+        for name in os.listdir(src):
+            if not os.path.exists(os.path.join(dest, name)):
+                shutil.move(os.path.join(src, name), os.path.join(dest, name))
+    except OSError:
+        pass                                        # a game then just starts with fresh data
+
+
+def data_path(path):
+    """The folder holding a game's saves and settings (as emu.py names it)."""
+    name = os.path.basename(path.rstrip('/')).rsplit('.', 1)[0]
+    return os.path.join(os.environ['PP_DATA'], name)
+
+
+def clear_data(path):
+    """Delete a game's saves and settings, as deleting and reinstalling the app did on iOS."""
+    shutil.rmtree(data_path(path), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------- running

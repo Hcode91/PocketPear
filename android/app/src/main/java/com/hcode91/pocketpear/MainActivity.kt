@@ -3,7 +3,12 @@ package com.hcode91.pocketpear
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var list: LinearLayout
     private lateinit var py: PyObject
     private var busy = false
+    private lateinit var access: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +67,11 @@ class MainActivity : Activity() {
             text = "Import game (.ipa)"
             setOnClickListener { pick(REQ_IPA) }
         }, LinearLayout.LayoutParams(-1, -2))
+        access = Button(this).apply {
+            text = "Allow file access (saves go in Internal storage/PocketPear)"
+            setOnClickListener { askForFileAccess() }
+        }
+        buttons.addView(access, LinearLayout.LayoutParams(-1, -2))
         buttons.addView(Button(this).apply {
             text = "Copy last game's log"
             setOnClickListener { GameActivity.copyLog(this@MainActivity, py) }
@@ -75,7 +86,32 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    override fun onResume() {
+        super.onResume()
+        // back from the all-files-access screen: move saves to the visible folder now
+        if (::py.isInitialized) { py = pocketpear(this); refresh() }
+    }
+
+    private fun askForFileAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName")))
+            } catch (e: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+        } else {
+            requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 3)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        py = pocketpear(this); refresh()
+    }
+
     private fun refresh() {
+        access.visibility = if (hasFileAccess(this)) View.GONE else View.VISIBLE
         val ready = py.callAttr("firmware_ready", filesDir.absolutePath).toBoolean()
         status.text = if (ready) "Firmware: ready (iPhone 5, iOS 6)" else
             "Firmware: not imported. Import the iPhone 5 iOS 6 firmware first: the .dmg, a .zip of it, or all its split parts (.001, .002, ...) picked together."
@@ -104,9 +140,19 @@ class MainActivity : Activity() {
                         .putExtra("app", path).putExtra("name", name))
                 }
                 setOnLongClickListener {
-                    AlertDialog.Builder(this@MainActivity).setTitle("Remove $name?")
-                        .setPositiveButton("Remove") { _, _ -> py.callAttr("remove_app", path); refresh() }
-                        .setNegativeButton("Cancel", null).show()
+                    val where = py.callAttr("data_path", path).toString()
+                    AlertDialog.Builder(this@MainActivity).setTitle(name)
+                        .setItems(arrayOf("Clear game data", "Remove game")) { _, which ->
+                            if (which == 0) AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Clear $name's data?")
+                                .setMessage("Deletes its saves and settings, as reinstalling it did on an iPhone. The game stays installed.\n\n$where")
+                                .setPositiveButton("Clear") { _, _ -> py.callAttr("clear_data", path); toast("$name's data cleared.") }
+                                .setNegativeButton("Cancel", null).show()
+                            else AlertDialog.Builder(this@MainActivity).setTitle("Remove $name?")
+                                .setMessage("Its saves and settings are kept.")
+                                .setPositiveButton("Remove") { _, _ -> py.callAttr("remove_app", path); refresh() }
+                                .setNegativeButton("Cancel", null).show()
+                        }.show()
                     true
                 }
             })
@@ -176,8 +222,19 @@ class MainActivity : Activity() {
         fun pocketpear(a: Activity): PyObject {
             if (!Python.isStarted()) Python.start(AndroidPlatform(a))
             val m = Python.getInstance().getModule("pocketpear_android")
-            m.callAttr("setup", a.filesDir.absolutePath, a.applicationInfo.nativeLibraryDir, a.cacheDir.absolutePath)
+            m.callAttr("setup", a.filesDir.absolutePath, a.applicationInfo.nativeLibraryDir, a.cacheDir.absolutePath,
+                dataDir(a))
             return m
         }
+
+        fun hasFileAccess(a: Activity): Boolean =
+            if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+            else a.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+        /** Games' saves and settings: Internal storage/PocketPear/data when the player can see
+         *  it, else private storage (null). */
+        fun dataDir(a: Activity): String? =
+            if (hasFileAccess(a)) java.io.File(Environment.getExternalStorageDirectory(), "PocketPear/data").absolutePath
+            else null
     }
 }
