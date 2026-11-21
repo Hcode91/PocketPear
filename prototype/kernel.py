@@ -82,6 +82,7 @@ class Kernel:
         self.emu = emu
         self.uc = emu.uc
         self.fds = {0: None, 1: None, 2: None}
+        self.cwd = '/'                   # an iOS app starts in /; chdir moves it
         self.exited = None
         self.unimplemented = {}
         self.t0 = time.monotonic()
@@ -480,7 +481,31 @@ class Kernel:
 
     # --- files
     def guest_path(self, p):
-        return self.emu.cstr(p)
+        path = self.emu.cstr(p)
+        if path and not path.startswith('/'):
+            import posixpath
+            path = posixpath.normpath(posixpath.join(self.cwd, path))
+        return path
+
+    def sys_chdir(self):
+        path = self.guest_path(self.args(1)[0])
+        host = self.emu.host_path(path)
+        if not os.path.exists(host):
+            self.ret(2, True); return                  # ENOENT
+        if not os.path.isdir(host):
+            self.ret(20, True); return                 # ENOTDIR
+        self.cwd = path
+        self.log(f'chdir({path!r})')
+        self.ret(0)
+    sys_pthread_chdir = sys_chdir                      # one working directory for every thread
+
+    def sys_fchdir(self):
+        entry = self.fds.get(self.args(1)[0])
+        if not entry or not isinstance(entry[1], str) or not os.path.isdir(self.emu.host_path(entry[1])):
+            self.ret(EBADF if not entry else 20, True); return
+        self.cwd = entry[1]
+        self.ret(0)
+    sys_pthread_fchdir = sys_fchdir
 
     @staticmethod
     def writable(path):
@@ -594,7 +619,8 @@ class Kernel:
             else:
                 if writing:
                     os.makedirs(os.path.dirname(host), exist_ok=True)
-                fd = os.open(host, hflags, mode or 0o644)
+                # mode is read only with O_CREAT; without it the register holds whatever was there
+                fd = os.open(host, hflags, (mode & 0o7777 or 0o644) if flags & O_CREAT else 0o644)
         except OSError as e:
             self.log(f'open({path!r}) -> errno {e.errno}')
             self.ret(e.errno, True)
@@ -783,6 +809,17 @@ class Kernel:
     def sys_stat64(self): self.do_stat(True)
     def sys_lstat64(self): self.do_stat(True, follow=False)
     def sys_fstat64(self): self.do_stat(True, fd=True)
+
+    # The _extended calls also return the file's ACL (xsecurity); there never is one, so its
+    # size (the fourth argument, a size_t*) is answered 0.
+    def extended(self, follow=True, fd=None):
+        size_p = self.args(4)[3]
+        if size_p:
+            self.emu.w32(size_p, 0)
+        self.do_stat(True, follow=follow, fd=fd)
+    def sys_stat64_extended(self): self.extended()
+    def sys_lstat64_extended(self): self.extended(follow=False)
+    def sys_fstat64_extended(self): self.extended(fd=True)
 
     def sys_getattrlist(self):
         """getattrlist for the common attributes realpath and CFURL ask for: name, device,
