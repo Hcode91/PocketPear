@@ -607,6 +607,21 @@ class Kernel:
         self.ret(gfd)
     sys_open_nocancel = sys_open
 
+    def sys_socket(self):
+        """Only routing sockets: SCNetworkReachability opens one to hear about network changes
+        and logs a complaint every time it cannot. The socket never has anything to read, so
+        no change ever arrives, which is true here. Other kinds still fail (no networking)."""
+        domain, stype, proto = self.args(3)
+        if domain != 17:                       # PF_ROUTE
+            self.unimpl('socket', domain, 'socket')
+            self.ret(47, True)                 # EAFNOSUPPORT
+            return
+        gfd = 3
+        while gfd in self.fds:
+            gfd += 1
+        self.fds[gfd] = None
+        self.ret(gfd)
+
     def hostfd(self, gfd):
         e = self.fds.get(gfd)
         return e[0] if isinstance(e, tuple) else None
