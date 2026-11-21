@@ -1,0 +1,8 @@
+.gradle/
+build/
+app/build/
+build-unicorn/
+app/src/main/jniLibs/
+local.properties
+*.iml
+.idea/

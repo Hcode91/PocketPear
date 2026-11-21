@@ -13,9 +13,24 @@ import struct
 from unicorn.arm_const import *
 
 # ---------------------------------------------------------------------------- host
-_egl = ctypes.CDLL('libEGL.so.1')
-_gl = ctypes.CDLL('libGLESv2.so.2')
-_egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+ANDROID = hasattr(__import__('sys'), 'getandroidapilevel')
+
+
+def _lib(*names):
+    for n in names:
+        try:
+            return ctypes.CDLL(n)
+        except OSError:
+            pass
+    raise OSError(f'none of {names} found')
+
+
+_egl = _lib('libEGL.so.1', 'libEGL.so')
+_gl = _lib('libGLESv2.so.2', 'libGLESv2.so')
+if not ANDROID:
+    _egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+_egl.eglGetDisplay.restype = ctypes.c_void_p
+_egl.eglCreatePbufferSurface.restype = ctypes.c_void_p
 _egl.eglCreateContext.restype = ctypes.c_void_p
 _egl.eglGetProcAddress.restype = ctypes.c_void_p
 
@@ -118,8 +133,12 @@ class GLES:
         self.frame = 0
         self.draws = self.client_draws = 0     # since the last present
         self.unimplemented = {}
-        self.out_dir = os.environ.get('PP_FRAMES', '/tmp/pocketpear-frames')
-        os.makedirs(self.out_dir, exist_ok=True)
+        # Frames go to PNGs (PP_FRAMES; PP_FRAMES='' turns that off) and to frame_sink, a
+        # callable(rgba_bytes_bottom_up, width, height) the Android app sets to show them.
+        self.out_dir = os.environ.get('PP_FRAMES', '' if ANDROID else '/tmp/pocketpear-frames')
+        self.frame_sink = None
+        if self.out_dir:
+            os.makedirs(self.out_dir, exist_ok=True)
         landscape = any('Landscape' in str(o) for o in (emu.info.get('UISupportedInterfaceOrientations') or [])) \
             if not str(emu.info.get('UIInterfaceOrientation', '')).endswith('Portrait') else False
         self.screen = (1136, 640) if landscape else (640, 1136)
@@ -144,20 +163,32 @@ class GLES:
     def ensure_display(self):
         if self.display is not None:
             return
-        d = _egl.eglGetPlatformDisplay(0x31DD, None, None)          # EGL_PLATFORM_SURFACELESS_MESA
+        if ANDROID:
+            d = _egl.eglGetDisplay(None)                             # EGL_DEFAULT_DISPLAY
+        else:
+            d = _egl.eglGetPlatformDisplay(0x31DD, None, None)      # EGL_PLATFORM_SURFACELESS_MESA
         maj, mi = ctypes.c_int(), ctypes.c_int()
         _egl.eglInitialize(ctypes.c_void_p(d), ctypes.byref(maj), ctypes.byref(mi))
         _egl.eglBindAPI(0x30A0)
         cfg, n = ctypes.c_void_p(), ctypes.c_int()
-        attrs = (ctypes.c_int * 13)(0x3040, 0x40, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3025, 24, 0x3038)
+        # ES 3, RGBA8, depth 24, stencil 8, pbuffer-capable (Android has no surfaceless guarantee)
+        attrs = (ctypes.c_int * 17)(0x3040, 0x40, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3025, 24,
+                                    0x3026, 8, 0x3033, 0x1, 0x3038)
         _egl.eglChooseConfig(ctypes.c_void_p(d), attrs, ctypes.byref(cfg), 1, ctypes.byref(n))
         self.display, self.config = d, cfg
         self.share = None
+        self.surface = None
+        if ANDROID:
+            # Every guest context draws into framebuffer objects; the pbuffer only makes the
+            # context current where surfaceless contexts are not supported.
+            pb = (ctypes.c_int * 5)(0x3057, 16, 0x3056, 16, 0x3038)
+            self.surface = _egl.eglCreatePbufferSurface(ctypes.c_void_p(d), cfg, pb)
         print(f'[gles] host EGL {maj.value}.{mi.value}, screen {self.screen[0]}x{self.screen[1]}')
 
     def make_current(self, guest_ctx):
         ctx = self.contexts.get(guest_ctx, (None,))[0] if guest_ctx else None
-        _egl.eglMakeCurrent(ctypes.c_void_p(self.display), None, None, ctypes.c_void_p(ctx) if ctx else None)
+        surf = ctypes.c_void_p(self.surface) if self.surface and ctx else None
+        _egl.eglMakeCurrent(ctypes.c_void_p(self.display), surf, surf, ctypes.c_void_p(ctx) if ctx else None)
 
     # ------------------------------------------------------------------------ install
     def install(self, stubs, syms):
@@ -276,13 +307,16 @@ class GLES:
     def eagl_present(self):
         guest, _cmd, target = self.args(3)
         self.frame += 1
+        if self.frame_sink is not None:
+            self.frame_sink(self.read_frame(), *self.screen)
         every = int(os.environ.get('PP_FRAME_EVERY', 30))
-        if self.frame == 1 or self.frame % every == 0:
+        if self.out_dir and (self.frame == 1 or self.frame % every == 0):
             self.save_frame()
         self.draws = self.client_draws = 0
         self.ret(1)
 
-    def save_frame(self):
+    def read_frame(self):
+        """The presented renderbuffer as RGBA bytes, bottom row first (GL order)."""
         rb = ctypes.c_int()
         _gl.glGetIntegerv(GL_RENDERBUFFER_BINDING, ctypes.byref(rb))
         prev = ctypes.c_int()
@@ -296,6 +330,11 @@ class GLES:
         _gl.glReadPixels(0, 0, w, h, 0x1908, 0x1401, buf)
         _gl.glBindFramebuffer(GL_FRAMEBUFFER, prev.value)
         _gl.glDeleteFramebuffers(1, ctypes.byref(fbo))
+        return bytes(buf)
+
+    def save_frame(self):
+        w, h = self.screen
+        buf = self.read_frame()
         try:
             from PIL import Image
             img = Image.frombuffer('RGBA', (w, h), bytes(buf), 'raw', 'RGBA', 0, -1)

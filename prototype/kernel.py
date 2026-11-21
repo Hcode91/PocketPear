@@ -48,7 +48,17 @@ import json as _json
 # Numbers and names come from libsystem_kernel's own stubs (bsdnums.json, made by
 # tools/sysnums.py); the entries below only rename calls whose iOS 6 stub is the 64-bit-inode
 # variant, or add numbers whose stubs that tool does not recognise.
-BSD_NAMES = {int(k): v for k, v in _json.load(open(os.path.join(os.path.dirname(__file__), 'bsdnums.json'))).items()}
+def _data(name):
+    """A data file beside this module: from disk, or through the loader when the module runs
+    from an archive (the Android app's packaged Python)."""
+    try:
+        return open(os.path.join(os.path.dirname(__file__), name), 'rb').read()
+    except OSError:
+        import pkgutil
+        return pkgutil.get_data(__name__, name)
+
+
+BSD_NAMES = {int(k): v for k, v in _json.loads(_data('bsdnums.json')).items()}
 BSD_NAMES.update({20: 'getpid', 188: 'stat', 189: 'fstat', 190: 'lstat', 338: 'stat64', 339: 'fstat64', 340: 'lstat64',
                   93: 'select', 197: 'mmap', 202: 'sysctl', 220: 'getattrlist', 221: 'setattrlist', 153: 'pread',
                   154: 'pwrite', 295: 'shared_region_map_np', 301: 'psynch_mutexwait', 302: 'psynch_mutexdrop',

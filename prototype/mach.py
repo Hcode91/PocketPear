@@ -25,7 +25,8 @@ NAMES = {200: 'host_info', 201: 'host_kernel_version', 202: 'host_page_size', 20
 
 
 import json, os
-_MIG = {int(k): v for k, v in json.load(open(os.path.join(os.path.dirname(__file__), 'migids.json'))).items()}
+from kernel import _data
+_MIG = {int(k): v for k, v in json.loads(_data('migids.json')).items()}
 for _k, _v in _MIG.items():
     NAMES.setdefault(_k, _v[len('_kernelrpc_'):] if _v.startswith('_kernelrpc_') else _v)
 

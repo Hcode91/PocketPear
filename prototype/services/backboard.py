@@ -105,12 +105,26 @@ class Touches:
                 self.events.append((t + 0.08, TOUCH_UP, x, y))
         self.events.sort()
 
-    def to_screen(self, x, y):
+    def inject(self, kind, x, y):
+        """A live touch (from the Android app): kind 'down', 'move' or 'up', in frame pixels."""
+        from sched import CLOCK
+        k = {'down': TOUCH_DOWN, 'move': TOUCH_DRAGGED, 'up': TOUCH_UP}[kind]
+        x, y = self.to_screen(x, y, space='frame')
+        self.events.append((CLOCK.now(), k, x, y))
+
+    def to_screen(self, x, y, space=None):
         """Frame pixels of a landscape game -> portrait screen points (320x568, 2x)."""
-        if not self.space.startswith('frame'):
+        space = space or self.space
+        if not space.startswith('frame'):
             return x, y
+        try:
+            w, h = self.k.emu.gles.screen
+        except AttributeError:
+            w, h = 1136, 640
+        if w < h:                                     # a portrait game: frame pixels / 2
+            return x / 2, y / 2
         lx, ly = x / 2, y / 2                         # landscape points
-        if self.space == 'frame-left':
+        if space == 'frame-left' or self.space == 'frame-left':
             return ly, 568 - lx
         return 320 - ly, lx
 

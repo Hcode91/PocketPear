@@ -63,3 +63,24 @@ level (`prototype/hle.py`) rather than through the kernel's psynch calls. Thread
 system calls (and every 512th call), because stopping Unicorn mid-instruction-stream loses the
 Thumb IT-block state; `PP_SLICE=n` forces instruction-count slices anyway, and `PP_WATCHDOG`
 (seconds) reports a thread that never makes a call that waits.
+
+
+## Android app (`android/`)
+
+A Kotlin app (package `com.hcode91.pocketpear`) that runs the prototype on the phone through
+Chaquopy (Python 3.13), with Unicorn cross-built for arm64 and the phone's own OpenGL ES.
+It is the same emulator as the desktop runs, so it is just as slow: a demo, not yet playable.
+The fast native core (step 4) replaces it later.
+
+- **Firmware**: *Import firmware (.zip)* takes a zip of an iPhone 5 iOS 6 root filesystem
+  (any folder level; it must contain
+  `System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7s`). Symlinks are kept.
+- **Games**: *Import game (.ipa)* takes a decrypted `.ipa`. Long-press a game to remove it.
+- **Playing**: frames are shown as they are presented; touches go to the game live. Each run
+  is its own process (`:game`), so Back ends it cleanly. The full log of a run is
+  `files/run.log` in the app's storage.
+
+Building: GitHub Actions (`.github/workflows/android.yml`) builds `app-debug.apk` on every push
+to `main` (artifact *PocketPear-apk*). Locally: `android/build-unicorn.sh <ndk>` once (builds
+`libunicorn.so` and copies Unicorn's Python binding), then `./gradlew assembleDebug` in
+`android/`. The APK is signed with a fixed key in the repo, so new builds install over old ones.

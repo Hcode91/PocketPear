@@ -55,7 +55,8 @@ def _random_file():
     # A fixed stream of random bytes, so runs repeat; PP_REALTIME uses the host's.
     if os.environ.get('PP_REALTIME'):
         return '/dev/urandom'
-    p = '/tmp/pocketpear-random.bin'
+    import tempfile
+    p = os.path.join(tempfile.gettempdir(), 'pocketpear-random.bin')
     if not os.path.exists(p):
         import random
         open(p, 'wb').write(random.Random(1).randbytes(1 << 20))
@@ -68,8 +69,8 @@ DEVICES = {'/dev/urandom': _random_file, '/dev/random': _random_file, '/dev/null
 
 class Emulator:
     def __init__(self, rootfs, app_dir):
-        self.rootfs = rootfs
-        self.app_dir = os.path.abspath(app_dir)
+        self.rootfs = os.path.realpath(rootfs)
+        self.app_dir = os.path.realpath(app_dir)    # a symlinked bundle would show the host path to lstat
         self.app_guest = CONTAINER + '/' + os.path.basename(self.app_dir)
         # The app's data container: Documents, Library and tmp live on the host, per app.
         name = os.path.basename(self.app_dir).rsplit('.', 1)[0]
@@ -478,7 +479,8 @@ class Emulator:
         t0 = time.time()
         last_beat = t0
         executed = 0
-        while self.kernel.exited is None:
+        self.quit = False
+        while self.kernel.exited is None and not self.quit:
             self.displaylinks.deliver()
             self.kernel.touches.deliver(CLOCK.now())
             t, state = self.sched.pick()
@@ -541,9 +543,18 @@ class Emulator:
         print(f'[emu] ran {time.time() - t0:.1f}s, exit={self.kernel.exited}, threads={len(self.sched.threads)}')
 
 
-if __name__ == '__main__':
-    rootfs, app = sys.argv[1], sys.argv[2]
+def start(rootfs, app):
+    """Load an app bundle over a root filesystem and set up its main thread; run() runs it."""
     emu = Emulator(rootfs, app)
-    exe_name = os.path.basename(app).rsplit('.', 1)[0]
+    import plistlib
+    try:
+        exe_name = plistlib.load(open(os.path.join(app, 'Info.plist'), 'rb'))['CFBundleExecutable']
+    except Exception:
+        exe_name = os.path.basename(app.rstrip('/')).rsplit('.', 1)[0]
     emu.setup([emu.app_guest + '/' + exe_name], ['HOME=' + CONTAINER, 'TMPDIR=' + CONTAINER + '/tmp/', 'IPHONE_SHARED_RESOURCES_DIRECTORY=/var/mobile', 'USER=mobile', 'LOGNAME=mobile', 'SHELL=/bin/sh', 'DYLD_PRINT_LIBRARIES=1' if os.environ.get('DYLD_LIBS') else 'X=1'])
+    return emu
+
+
+if __name__ == '__main__':
+    emu = start(sys.argv[1], sys.argv[2])
     emu.run(int(sys.argv[3]) if len(sys.argv) > 3 else 0)
