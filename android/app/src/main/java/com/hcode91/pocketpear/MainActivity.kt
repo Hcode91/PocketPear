@@ -53,7 +53,7 @@ class MainActivity : Activity() {
 
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         buttons.addView(Button(this).apply {
-            text = "Import firmware (.zip)"
+            text = "Import firmware (.dmg, .zip or split parts)"
             setOnClickListener { pick(REQ_FIRMWARE) }
         })
         buttons.addView(Button(this).apply {
@@ -112,26 +112,47 @@ class MainActivity : Activity() {
     private fun pick(req: Int) {
         if (busy) return
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+        if (req == REQ_FIRMWARE) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         startActivityForResult(i, req)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        val uri = data?.data ?: return
-        if (resultCode != RESULT_OK) return
-        val pfd = contentResolver.openFileDescriptor(uri, "r") ?: return
-        val fd = pfd.detachFd()                   // Python owns and closes it
+        if (resultCode != RESULT_OK || data == null) return
+        val uris = ArrayList<android.net.Uri>()
+        val clip = data.clipData
+        if (clip != null) for (k in 0 until clip.itemCount) uris.add(clip.getItemAt(k).uri)
+        else data.data?.let { uris.add(it) }
+        if (uris.isEmpty()) return
+        val names = ArrayList<String>()
+        val fds = ArrayList<Int>()
+        for (u in uris) {
+            val pfd = contentResolver.openFileDescriptor(u, "r") ?: continue
+            names.add(displayName(u))
+            fds.add(pfd.detachFd())               // Python owns and closes these
+        }
+        if (fds.isEmpty()) return
         busy = true
         status.text = "Importing..."
-        val fn = if (requestCode == REQ_FIRMWARE) "import_firmware" else "import_ipa"
         Thread {
             val msg = try {
-                py.callAttr(fn, fd, filesDir.absolutePath, Progress()).toString()
+                if (requestCode == REQ_FIRMWARE)
+                    py.callAttr("import_firmware", fds.toIntArray(), names.toTypedArray(),
+                        filesDir.absolutePath, Progress()).toString()
+                else
+                    py.callAttr("import_ipa", fds[0], filesDir.absolutePath, Progress()).toString()
             } catch (e: Throwable) {
                 "Import failed: ${e.message}"
             }
             ui.post { busy = false; toast(msg); refresh() }
         }.start()
+    }
+
+    private fun displayName(u: android.net.Uri): String {
+        contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0)?.let { return it }
+        }
+        return u.lastPathSegment ?: ""
     }
 
     inner class Progress {

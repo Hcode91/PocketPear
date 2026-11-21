@@ -84,3 +84,12 @@ Building: GitHub Actions (`.github/workflows/android.yml`) builds `app-debug.apk
 to `main` (artifact *PocketPear-apk*). Locally: `android/build-unicorn.sh <ndk>` once (builds
 `libunicorn.so` and copies Unicorn's Python binding), then `./gradlew assembleDebug` in
 `android/`. The APK is signed with a fixed key in the repo, so new builds install over old ones.
+
+### Importing firmware
+
+The firmware button takes the iPhone 5 (iOS 6) root filesystem as you have it: a decrypted
+`.dmg` (UDIF, or a bare HFS+ image), a `.zip` holding the `.dmg` or the root folder, or the split
+parts of either (`.001`, `.002`, ...) picked together. The app reads the HFS+ volume itself
+(compressed files and absolute symlinks included), so nothing needs unpacking first. A zipped
+`.dmg` that is compressed inside the zip is unpacked to the app's cache first, which needs about
+1 GB free for a moment.

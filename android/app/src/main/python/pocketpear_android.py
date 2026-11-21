@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 import threading
+import struct
 import zipfile
 
 CACHE_IN_ROOT = 'System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7s'
@@ -59,20 +60,96 @@ def _extract(zf, members, prefix, dest, progress, label):
             progress.onProgress(label, pct)
 
 
-def import_firmware(fd, files_dir, progress=None):
-    """A .zip of an iOS 6 root filesystem (any folder level). Returns a message for the user."""
-    with os.fdopen(fd, 'rb') as f, zipfile.ZipFile(f) as zf:
-        names = zf.namelist()
-        hit = next((n for n in names if n.endswith(CACHE_IN_ROOT)), None)
-        if hit is None:
-            return 'That zip has no ' + CACHE_IN_ROOT + ' - it needs the whole root filesystem of an iPhone 5 firmware (iOS 6).'
-        prefix = hit[:-len(CACHE_IN_ROOT)]
+def import_firmware(fds, names, files_dir, progress=None):
+    """Firmware as the user has it: a .dmg, a .zip (of a .dmg or of the root folder), or the
+    split parts (.001, .002, ...) of either, picked together. Returns a message for the user."""
+    import fwimport
+    parts = sorted(zip(list(names), list(fds)), key=lambda p: p[0])
+    try:
+        src = fwimport.Source([fd for _, fd in parts])
         dest = os.path.join(files_dir, 'firmware', 'root')
+        tmp = dest + '.new'
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp)
+        head = src.pread(4, 0)
+        if head == b'7z\xbc\xaf':
+            return 'That is a 7z archive. Pick the .zip or .dmg inside it, or its split parts (.001, .002, ...).'
+        if head[:2] == b'PK':
+            msg = _firmware_from_zip(src, files_dir, tmp, progress)
+            if msg:
+                return msg
+        else:
+            try:
+                vol = fwimport.open_volume(src)
+            except ValueError as e:
+                return f'Could not read that file as a disk image ({e}).'
+            fwimport.extract_hfs(vol, tmp, progress)
+        if not os.path.exists(os.path.join(tmp, CACHE_IN_ROOT)):
+            shutil.rmtree(tmp, ignore_errors=True)
+            return 'That image has no ' + CACHE_IN_ROOT + ' - it needs the root filesystem of an iPhone 5 firmware (iOS 6).'
         if os.path.exists(dest):
             shutil.rmtree(dest)
+        os.rename(tmp, dest)
+        return 'Firmware imported.'
+    finally:
+        for _, fd in parts:
+            os.close(fd)
+
+
+def _firmware_from_zip(src, files_dir, tmp, progress):
+    import fwimport
+    zf = zipfile.ZipFile(fwimport.SourceFile(src))
+    names = zf.namelist()
+    hit = next((n for n in names if n.endswith(CACHE_IN_ROOT)), None)
+    if hit is not None:                                  # the root folder itself, zipped
+        prefix = hit[:-len(CACHE_IN_ROOT)]
         members = [m for m in zf.infolist() if m.filename.startswith(prefix)]
-        _extract(zf, members, prefix, dest, progress, 'Firmware')
-    return 'Firmware imported.'
+        _extract(zf, members, prefix, tmp, progress, 'Firmware')
+        return None
+    dmgs = sorted((m for m in zf.infolist() if m.filename.lower().endswith('.dmg')),
+                  key=lambda m: -m.file_size)
+    if not dmgs:
+        return 'That zip has no .dmg and no root filesystem in it.'
+    m = dmgs[0]
+    if m.compress_type == zipfile.ZIP_STORED:            # read it where it is
+        local = src.pread(30, m.header_offset)
+        n, x = struct.unpack_from('<HH', local, 26)
+        vol_src = _Slice(src, m.header_offset + 30 + n + x, m.file_size)
+        fwimport.extract_hfs(fwimport.open_volume(vol_src), tmp, progress)
+        return None
+    cache = os.path.join(os.path.dirname(files_dir.rstrip('/')), 'cache', 'firmware.dmg')
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    try:
+        with zf.open(m) as a, open(cache, 'wb') as b:
+            done, last = 0, -1
+            while True:
+                buf = a.read(8 << 20)
+                if not buf:
+                    break
+                b.write(buf)
+                done += len(buf)
+                pct = done * 100 // max(1, m.file_size)
+                if progress is not None and pct != last:
+                    last = pct
+                    progress.onProgress('Unzipping the disk image', pct)
+        fd = os.open(cache, os.O_RDONLY)
+        try:
+            fwimport.extract_hfs(fwimport.open_volume(fwimport.Source([fd])), tmp, progress)
+        finally:
+            os.close(fd)
+    finally:
+        if os.path.exists(cache):
+            os.remove(cache)
+    return None
+
+
+class _Slice:
+    def __init__(self, src, off, size):
+        self.src, self.off, self.size = src, off, size
+
+    def pread(self, n, off):
+        n = max(0, min(n, self.size - off))
+        return self.src.pread(n, self.off + off)
 
 
 def import_ipa(fd, files_dir, progress=None):
