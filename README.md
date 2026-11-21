@@ -41,8 +41,13 @@ game draws its studio logos, title screen and full main menu (1136x640, multisam
 frames a second of guest time, and taps reach Unity's view. Core Animation commits arrive at the
 render server stand-in but are not drawn (Unity draws everything itself). No sound yet.
 
+Tapping "Play Wipeout!" and then "Yes" on the first-time dialog starts the audition: the 3D
+tutorial course renders and the game asks for thumb input.
+
 Touches are scripted for now: `PP_TOUCH="t:x,y;t:x,y>x2,y2"` taps (or drags) at guest time t
-seconds, in the screen's portrait points (320x568). They are sent as GraphicsServices hand events
+seconds, in the screen's portrait points (320x568), or with `PP_TOUCH_SPACE=frame` in the
+saved frames' pixels (landscape right; `frame-left` for landscape left). For example
+`PP_TOUCH_SPACE=frame PP_TOUCH="9:430,280;11:840,535"` reaches Wipeout's tutorial. They are sent as GraphicsServices hand events
 (type 3001) carrying the app window's render context, as backboardd sends a finger. The game's
 own log (NSLog, ASL, Unity's Debug.Log) is printed as `[log]` lines by a
 `com.apple.system.logger` stand-in, and SpringBoard's `GSCapabilities` shared memory object

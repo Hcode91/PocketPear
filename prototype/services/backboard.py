@@ -80,19 +80,23 @@ class Touches:
     way backboardd sends a finger. Points are in the screen's portrait coordinates (320x568
     points on an iPhone 5), which UIKit rotates into the app's orientation itself.
 
-    PP_TOUCH="t:x,y;..." taps at guest time t (seconds); "t:x,y>x2,y2" drags."""
+    PP_TOUCH="t:x,y;..." taps at guest time t (seconds); "t:x,y>x2,y2" drags. With
+    PP_TOUCH_SPACE=frame the points are pixels of the saved frames instead (1136x640 for a
+    landscape game), turned into screen points for the landscape-right orientation, or
+    landscape-left with PP_TOUCH_SPACE=frame-left."""
 
     def __init__(self, kernel, script):
         self.k = kernel
+        self.space = os.environ.get('PP_TOUCH_SPACE', '')
         self.events = []                      # (time, kind, x, y)
         for item in filter(None, script.split(';')):
             t, _, where = item.partition(':')
             t = float(t)
             a, _, b = where.partition('>')
-            x, y = map(float, a.split(','))
+            x, y = self.to_screen(*map(float, a.split(',')))
             self.events.append((t, TOUCH_DOWN, x, y))
             if b:
-                x2, y2 = map(float, b.split(','))
+                x2, y2 = self.to_screen(*map(float, b.split(',')))
                 for i in range(1, 11):
                     f = i / 10
                     self.events.append((t + 0.02 * i, TOUCH_DRAGGED, x + (x2 - x) * f, y + (y2 - y) * f))
@@ -100,6 +104,15 @@ class Touches:
             else:
                 self.events.append((t + 0.08, TOUCH_UP, x, y))
         self.events.sort()
+
+    def to_screen(self, x, y):
+        """Frame pixels of a landscape game -> portrait screen points (320x568, 2x)."""
+        if not self.space.startswith('frame'):
+            return x, y
+        lx, ly = x / 2, y / 2                         # landscape points
+        if self.space == 'frame-left':
+            return ly, 568 - lx
+        return 320 - ly, lx
 
     def next_due(self):
         port = self.k.launcher.port if self.k.launcher.sent else None
