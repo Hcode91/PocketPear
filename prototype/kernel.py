@@ -59,6 +59,9 @@ def _data(name):
 
 
 BSD_NAMES = {int(k): v for k, v in _json.loads(_data('bsdnums.json')).items()}
+# extended-attribute calls the stub table has no names for (xnu syscalls.master)
+for _n, _name in ((234, 'getxattr'), (235, 'fgetxattr'), (236, 'setxattr'), (237, 'fsetxattr')):
+    BSD_NAMES.setdefault(_n, _name)
 BSD_NAMES.update({20: 'getpid', 188: 'stat', 189: 'fstat', 190: 'lstat', 338: 'stat64', 339: 'fstat64', 340: 'lstat64',
                   93: 'select', 197: 'mmap', 202: 'sysctl', 220: 'getattrlist', 221: 'setattrlist', 153: 'pread',
                   154: 'pwrite', 295: 'shared_region_map_np', 301: 'psynch_mutexwait', 302: 'psynch_mutexdrop',
@@ -615,6 +618,20 @@ class Kernel:
         self.fds[gfd] = (fd, '/shm/' + name)
         self.log(f'shm_open({name!r}) = {gfd}')
         self.ret(gfd)
+
+    # Extended attributes. Files here never have any: listing answers an empty list, reading
+    # or removing one answers ENOATTR, and setting one is accepted and forgotten. Answering
+    # ENOSYS made NSFileManager's copyItemAtPath: fail after the first file (Cocoa error 512,
+    # "error processing extended attributes"), leaving a half-copied folder behind.
+    ENOATTR = 93
+    def sys_listxattr(self): self.ret(0)
+    def sys_flistxattr(self): self.ret(0)
+    def sys_getxattr(self): self.ret(self.ENOATTR, True)
+    def sys_fgetxattr(self): self.ret(self.ENOATTR, True)
+    def sys_setxattr(self): self.ret(0)
+    def sys_fsetxattr(self): self.ret(0)
+    def sys_removexattr(self): self.ret(self.ENOATTR, True)
+    def sys_fremovexattr(self): self.ret(self.ENOATTR, True)
 
     def sys_flock(self):
         self.ret(0)                          # one process: advisory locks always succeed
