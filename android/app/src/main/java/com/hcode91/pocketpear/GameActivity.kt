@@ -111,20 +111,23 @@ class GameActivity : Activity() {
         if (frames == 1) say("First frame. Tap the screen to play; tap this text to hide it.")
     }
 
-    /** View coordinates -> the game's frame pixels, through FIT_CENTER's scale and offset. */
+    /** Every finger on the screen, in the game's frame pixels (view coordinates through
+     *  FIT_CENTER's scale and offset), so the game sees several touches at once. */
     private fun onTouch(v: View, e: MotionEvent) {
-        val kind = when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> "down"
-            MotionEvent.ACTION_MOVE -> "move"
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> "up"
+        val lifted = when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_MOVE -> -1
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> e.getPointerId(e.actionIndex)
+            MotionEvent.ACTION_CANCEL -> -2          // every finger goes
             else -> return
         }
         val s = minOf(v.width.toFloat() / frameW, v.height.toFloat() / frameH)
         val ox = (v.width - frameW * s) / 2
         val oy = (v.height - frameH * s) / 2
-        val x = ((e.x - ox) / s).coerceIn(0f, frameW - 1f)
-        val y = ((e.y - oy) / s).coerceIn(0f, frameH - 1f)
-        touches.execute { py.callAttr("touch", kind, x, y) }
+        val n = if (lifted == -2) 0 else e.pointerCount
+        val ids = IntArray(n) { e.getPointerId(it) }
+        val xs = FloatArray(n) { ((e.getX(it) - ox) / s).coerceIn(0f, frameW - 1f) }
+        val ys = FloatArray(n) { ((e.getY(it) - oy) / s).coerceIn(0f, frameH - 1f) }
+        touches.execute { py.callAttr("touches", ids, xs, ys, lifted) }
     }
 
     companion object {

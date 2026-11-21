@@ -65,20 +65,25 @@ HAND = 3001                                   # kGSEventHand
 TOUCH_DOWN, TOUCH_DRAGGED, TOUCH_UP = 1, 2, 5
 
 
-def hand_info(kind, x, y):
-    """GSHandInfo with one GSPathInfo, as GSEventGetHandInfo/GetPathInfoAtIndex read them on
-    iOS 6: hand info 0x24 bytes (type, two touch counts, six floats, four bytes), then 0x1c-byte path infos (index, identity, proximity, pressure, major
-    radius, location, window, one more word). The path count is the byte at +0x22."""
-    down = kind != TOUCH_UP
-    hand = struct.pack('<IHH6fBBBB', kind, 1, 1, *([0.0] * 6), 0, 0, 1, 0)
-    path = struct.pack('<BBBxff2fII', 1, 2, 3 if down else 0, 1.0 if down else 0.0, 1.0, x, y, 0, 0)
-    return hand + path
+def hand_info(kind, paths):
+    """GSHandInfo with one GSPathInfo per finger, as GSEventGetHandInfo/GetPathInfoAtIndex read
+    them on iOS 6: hand info 0x24 bytes (type, two touch counts, six floats, four bytes), then
+    0x1c-byte path infos (index, identity, proximity, pressure, major radius, location, window,
+    one more word). The path count is the byte at +0x22. paths: (slot, x, y, down) per finger;
+    a finger lifting in this event is sent once more with proximity 0, which is how UIKit sees
+    that touch end while the others carry on."""
+    count = sum(1 for p in paths if p[3])
+    hand = struct.pack('<IHH6fBBBB', kind, count, count, *([0.0] * 6), 0, 0, len(paths), 0)
+    body = b''.join(struct.pack('<BBBxff2fII', slot + 1, slot + 2, 3 if down else 0, 1.0 if down else 0.0,
+                                1.0, x, y, 0, 0) for slot, x, y, down in paths)
+    return hand + body
 
 
 class Touches:
-    """Scripted taps and drags (PP_TOUCH), sent to the app as GraphicsServices hand events the
-    way backboardd sends a finger. Points are in the screen's portrait coordinates (320x568
-    points on an iPhone 5), which UIKit rotates into the app's orientation itself.
+    """Taps and drags, sent to the app as GraphicsServices hand events the way backboardd sends
+    fingers. Live touches come from the Android app, several fingers at once; scripted ones from
+    PP_TOUCH. Points are in the screen's portrait coordinates (320x568 points on an iPhone 5),
+    which UIKit rotates into the app's orientation itself.
 
     PP_TOUCH="t:x,y;..." taps at guest time t (seconds); "t:x,y>x2,y2" drags. With
     PP_TOUCH_SPACE=frame the points are pixels of the saved frames instead (1136x640 for a
@@ -88,29 +93,71 @@ class Touches:
     def __init__(self, kernel, script):
         self.k = kernel
         self.space = os.environ.get('PP_TOUCH_SPACE', '')
-        self.events = []                      # (time, kind, x, y)
+        self.events = []                      # (time, seq, kind, [(slot, x, y, down)])
+        self.seq = 0
+        self.live = {}                        # pointer id -> (slot, x, y)
+        self.scripted = []                    # (time, pointer, 'down'|'move'|'up', x, y)
         for item in filter(None, script.split(';')):
             t, _, where = item.partition(':')
             t = float(t)
             a, _, b = where.partition('>')
             x, y = self.to_screen(*map(float, a.split(',')))
-            self.events.append((t, TOUCH_DOWN, x, y))
+            self.scripted.append((t, 'down', x, y))
             if b:
                 x2, y2 = self.to_screen(*map(float, b.split(',')))
                 for i in range(1, 11):
                     f = i / 10
-                    self.events.append((t + 0.02 * i, TOUCH_DRAGGED, x + (x2 - x) * f, y + (y2 - y) * f))
-                self.events.append((t + 0.24, TOUCH_UP, x2, y2))
+                    self.scripted.append((t + 0.02 * i, 'move', x + (x2 - x) * f, y + (y2 - y) * f))
+                self.scripted.append((t + 0.24, 'up', x2, y2))
             else:
-                self.events.append((t + 0.08, TOUCH_UP, x, y))
-        self.events.sort()
+                self.scripted.append((t + 0.08, 'up', x, y))
+        self.scripted.sort()
 
-    def inject(self, kind, x, y):
-        """A live touch (from the Android app): kind 'down', 'move' or 'up', in frame pixels."""
-        from sched import CLOCK
-        k = {'down': TOUCH_DOWN, 'move': TOUCH_DRAGGED, 'up': TOUCH_UP}[kind]
+    def inject(self, kind, x, y, pointer=0):
+        """One finger (from the Android app): kind 'down', 'move' or 'up', in frame pixels."""
         x, y = self.to_screen(x, y, space='frame')
-        self.events.append((CLOCK.now(), k, x, y))
+        self.update({pointer: (kind, x, y)})
+
+    def inject_all(self, ids, xs, ys, lifted=-1):
+        """Every finger on the screen at once (from the Android app), in frame pixels; lifted
+        is the pointer that has just gone up (still listed), or -1."""
+        changes = {}
+        for i, x, y in zip(ids, xs, ys):
+            x, y = self.to_screen(float(x), float(y), space='frame')
+            kind = 'up' if i == lifted else ('move' if i in self.live else 'down')
+            changes[int(i)] = (kind, x, y)
+        for i in list(self.live):             # fingers the app no longer lists have gone
+            if i not in changes:
+                _, x, y = self.live[i]
+                changes[i] = ('up', x, y)
+        self.update(changes)
+
+    def update(self, changes, at=None):
+        """Applies finger changes (pointer -> (kind, x, y)) and queues the hand event."""
+        from sched import CLOCK
+        was_down = bool(self.live)
+        paths, self.new_slots = [], getattr(self, 'new_slots', set())
+        for i, (kind, x, y) in changes.items():
+            if kind == 'down' and i not in self.live:
+                used = {s for s, _, _ in self.live.values()}
+                slot = next(s for s in range(32) if s not in used)
+                self.live[i] = (slot, x, y)
+                self.new_slots.add(slot)
+            elif i in self.live:
+                self.live[i] = (self.live[i][0], x, y)
+            else:
+                continue
+            if kind == 'up':
+                slot = self.live.pop(i)[0]
+                paths.append((slot, x, y, False))
+        for i, (slot, x, y) in self.live.items():
+            paths.append((slot, x, y, True))
+        if not paths:
+            return
+        paths.sort()
+        kind = TOUCH_UP if not self.live else (TOUCH_DRAGGED if was_down else TOUCH_DOWN)
+        self.seq += 1
+        self.events.append((CLOCK.now() if at is None else at, self.seq, kind, paths))
 
     def to_screen(self, x, y, space=None):
         """Frame pixels of a landscape game -> portrait screen points (320x568, 2x)."""
@@ -129,22 +176,34 @@ class Touches:
         return 320 - ly, lx
 
     def next_due(self):
-        port = self.k.launcher.port if self.k.launcher.sent else None
-        return self.events[0][0] if self.events and port else None
+        if not self.k.launcher.sent or self.k.launcher.port is None:
+            return None
+        ts = [e[0] for e in self.events[:1]] + [e[0] for e in self.scripted[:1]]
+        return min(ts) if ts else None
 
     def deliver(self, now):
+        if not self.k.launcher.sent:
+            return
+        while self.scripted and self.scripted[0][0] <= now:
+            t, kind, x, y = self.scripted.pop(0)
+            self.update({-1: (kind, x, y)}, at=t)
         port = self.k.launcher.port
-        while self.events and self.k.launcher.sent and self.events[0][0] <= now:
-            _, kind, x, y = self.events.pop(0)
+        while self.events and self.events[0][0] <= now:
+            _, _, kind, paths = self.events.pop(0)
             from ports import TOKEN_SYSTEM
             stamp = int(now * 24e6)
             # backboardd names the window's render context; UIKit finds the window by it
             contexts = getattr(self.k, 'render_contexts', [])
             context = int(os.environ.get('PP_TOUCH_CONTEXT', '0'), 0) or (contexts[-1] if contexts else 0)
-            msg = gs_event(port, HAND, info=hand_info(kind, x, y), location=(x, y), timestamp=stamp,
-                           context=context)
+            first = next((p for p in paths if p[3]), paths[0])
+            msg = gs_event(port, HAND, info=hand_info(kind, paths), location=(first[1], first[2]),
+                           timestamp=stamp, context=context)
             self.k.pr.get(port).queue.append((msg, [], TOKEN_SYSTEM))
-            print(f'[backboard] touch {("down", "drag", "", "", "up")[kind - 1]} at ({x:.0f},{y:.0f}) t={now:.2f}s')
+            new = {p[0] for p in paths if p[3]} & self.new_slots
+            self.new_slots -= new
+            if kind != TOUCH_DRAGGED or new or any(not p[3] for p in paths) or os.environ.get('PP_TOUCH_TRACE'):
+                fingers = ' '.join(f'{s}:{"down" if d else "up"}({x:.0f},{y:.0f})' for s, x, y, d in paths)
+                print(f'[backboard] touch {("down", "drag", "", "", "up")[kind - 1]} t={now:.2f}s {fingers}')
 
 
 from services.base import MigServer

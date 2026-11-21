@@ -271,6 +271,14 @@ def touch(kind, x, y):
         e.kernel.touches.inject(kind, float(x), float(y))
 
 
+def touches(ids, xs, ys, lifted):
+    """Every finger on the screen, in the game's frame pixels; lifted is the pointer id that has
+    just gone up (it is still in the lists), or -1."""
+    e = _emu
+    if e is not None:
+        e.kernel.touches.inject_all(list(ids), list(xs), list(ys), int(lifted))
+
+
 def stop():
     e = _emu
     if e is not None:
