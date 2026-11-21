@@ -696,7 +696,7 @@ class Kernel:
         mode = st.st_mode
         if layout64:
             # dev, mode(16), nlink(16), ino(64), uid, gid, rdev, atime, mtime, ctime, birthtime, size, blocks, blksize, flags, gen, lspare, qspare[2]
-            return struct.pack('<iHHQIIi' + 'ii' * 4 + 'qqiIIiqq', 1, mode & 0xffff, min(st.st_nlink, 0xffff), st.st_ino, 501, 501, 0,
+            return struct.pack('<iHHQIIi' + 'ii' * 4 + 'qqiIIiqq', 1, mode & 0xffff, min(st.st_nlink, 0xffff), st.st_ino & 0xffffffffffffffff, 501, 501, 0,
                                int(st.st_atime), 0, int(st.st_mtime), 0, int(st.st_ctime), 0, int(st.st_mtime), 0,
                                st.st_size, (st.st_size + 511) // 512, 4096, 0, 0, 0, 0, 0)
         return struct.pack('<iIHHIIi' + 'ii' * 3 + 'qqiIIiqq', 1, st.st_ino & 0xffffffff, mode & 0xffff, min(st.st_nlink, 0xffff),
@@ -915,10 +915,14 @@ class Kernel:
 
     # ------------------------------------------------------------ file systems and directories
     def statfs_bytes(self):
-        st = os.statvfs('/')
+        # A fixed 16 GB disk, as an iPhone 5, rather than the host's: Android's / is a read-only
+        # system partition that can report its counts as "unlimited" (all ones), which Python
+        # reads as -1, and the guest has no business seeing the host's disk anyway.
         name = b'hfs'
-        return struct.pack('<IiQQQQQiiIIII16s1024s1024s32s', 4096, 1 << 20, st.f_blocks, st.f_bfree, st.f_bavail,
-                           st.f_files, st.f_ffree, 0x1000001, 0x1000001, 501, 0x11, 0x1000, 0, name,
+        blocks = (16 << 30) // 4096
+        free = (8 << 30) // 4096
+        return struct.pack('<IiQQQQQiiIIII16s1024s1024s32s', 4096, 1 << 20, blocks, free, free,
+                           1 << 20, 1 << 19, 0x1000001, 0x1000001, 501, 0x11, 0x1000, 0, name,
                            b'/private/var', b'/dev/disk0s1s2', b'')
 
     def sys_fstatfs(self):
@@ -961,7 +965,7 @@ class Kernel:
             except OSError:
                 ino, mode = pos + 2, 0o100644
             dtype = 4 if pystat.S_ISDIR(mode) else 10 if pystat.S_ISLNK(mode) else 8
-            rec = struct.pack('<QQHHB', ino, pos + 1, reclen, len(n), dtype) + n + b'\0'
+            rec = struct.pack('<QQHHB', ino & 0xffffffffffffffff, pos + 1, reclen, len(n), dtype) + n + b'\0'
             out += rec + bytes(reclen - len(rec))
             pos += 1
         self.dirs[gfd][1] = pos

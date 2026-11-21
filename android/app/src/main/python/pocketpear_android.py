@@ -204,13 +204,20 @@ class _Log:
         self.f = open(path, 'w', buffering=1 << 16)
         self.listener = listener
         self.part = ''
+        self.in_traceback = False
 
     def write(self, s):
         self.f.write(s)
         self.part += s
         while '\n' in self.part:
             line, self.part = self.part.split('\n', 1)
-            if any(k in line for k in self.SHOW):
+            # a traceback is shown whole: the line that raised is what matters
+            show = self.in_traceback or any(k in line for k in self.SHOW)
+            if line.startswith('Traceback'):
+                self.in_traceback = True
+            elif self.in_traceback and not line.startswith(' '):
+                self.in_traceback = False       # the exception line ends it, and is shown
+            if show:
                 try:
                     self.listener.onLog(line[:300])
                 except Exception:
