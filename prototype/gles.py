@@ -762,22 +762,45 @@ class GLES:
         _gl.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600)
         _gl.glBindFramebuffer(0x8CA8, read_fb.value)
 
+    @staticmethod
+    def bound_buffer(target):
+        b = ctypes.c_int()
+        _gl.glGetIntegerv(0x8895 if target == 0x8893 else 0x8894, ctypes.byref(b))   # ELEMENT/ARRAY_BUFFER_BINDING
+        return b.value
+
     def glMapBufferOES(self):
+        # The game gets guest memory holding the buffer's current contents (it may change only
+        # part of it), and unmapping uploads it all. Mappings are kept per buffer object, not per
+        # target: Unity maps several vertex buffers in a row (binding each in turn) and only then
+        # unmaps them. The guest pages are kept for the next map of the same size.
         target, access = self.args(2)
         size = ctypes.c_int()
-        _gl.glGetBufferParameteriv(target, 0x8764, ctypes.byref(size))   # GL_BUFFER_SIZE
-        a = self.alloc(max(size.value, 1))
-        self.mapped[target] = (a, size.value)
+        _gl.glGetBufferParameteriv(ctypes.c_uint(target), 0x8764, ctypes.byref(size))   # GL_BUFFER_SIZE
+        pages = (max(size.value, 1) + 0xfff) & ~0xfff
+        pool = self.__dict__.setdefault('map_pool', {})
+        free = pool.get(pages)
+        a = free.pop() if free else self.alloc(pages)
+        if size.value:
+            _gl.glMapBufferRange.restype = ctypes.c_void_p
+            p = _gl.glMapBufferRange(ctypes.c_uint(target), ctypes.c_ssize_t(0),
+                                     ctypes.c_ssize_t(size.value), ctypes.c_uint(1))   # GL_MAP_READ_BIT
+            if p:
+                self.emu.write(a, ctypes.string_at(p, size.value))
+                _gl.glUnmapBuffer(ctypes.c_uint(target))
+        self.mapped[(target, self.bound_buffer(target))] = (a, size.value, pages)
         self.ret(a)
 
     def glUnmapBufferOES(self):
         target, = self.args(1)
-        a, size = self.mapped.pop(target, (0, 0))
+        a, size, pages = self.mapped.pop((target, self.bound_buffer(target)), (0, 0, 0))
         if a:
-            blob = self.read(a, size)
-            _gl.glBufferSubData(target, 0, size, blob)
-            self.shadow_write(target, 0, blob)
-            self.emu.unmap(a, size)
+            if size:
+                blob = self.read(a, size)
+                # GLintptr/GLsizeiptr are 64-bit on the host: pass them typed, or the top half of
+                # the offset is whatever was in the register
+                _gl.glBufferSubData(ctypes.c_uint(target), ctypes.c_ssize_t(0), ctypes.c_ssize_t(size), blob)
+                self.shadow_write(target, 0, blob)
+            self.__dict__.setdefault('map_pool', {}).setdefault(pages, []).append(a)
         self.ret(1)
 
     def glLabelObjectEXT(self): self.ret(0)
