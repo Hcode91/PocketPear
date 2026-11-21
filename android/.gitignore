@@ -6,3 +6,4 @@ app/src/main/jniLibs/
 local.properties
 *.iml
 .idea/
+build-ppcpu/

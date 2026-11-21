@@ -25,6 +25,8 @@ def setup(files_dir, native_dir, cache_dir):
     os.environ['PP_DATA'] = os.path.join(files_dir, 'data')
     os.environ['PP_FRAMES'] = ''
     os.environ['LIBUNICORN_PATH'] = native_dir
+    os.environ['LIBPPCPU_PATH'] = os.path.join(native_dir, 'libppcpu.so')
+    os.environ.setdefault('PP_CPU', 'dynarmic')   # the JIT; Unicorn if it cannot load
     os.environ.setdefault('PP_TOUCH_SPACE', 'frame')
     for d in ('firmware', 'apps', 'data'):
         os.makedirs(os.path.join(files_dir, d), exist_ok=True)

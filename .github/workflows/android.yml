@@ -22,7 +22,7 @@ jobs:
           python-version: '3.13'
 
       - name: Tools
-        run: sudo apt-get install -y ninja-build
+        run: sudo apt-get install -y ninja-build libboost-dev
 
       - name: Unicorn for Android (cached by version)
         uses: actions/cache@v4
@@ -32,6 +32,15 @@ jobs:
 
       - name: Build Unicorn
         run: android/build-unicorn.sh "$ANDROID_NDK_LATEST_HOME"
+
+      - name: dynarmic source (cached by commit)
+        uses: actions/cache@v4
+        with:
+          path: android/build-ppcpu/dynarmic
+          key: dynarmic-src-a46601580d5512d324104f985b5f0209dc980ddc
+
+      - name: Build the CPU core (dynarmic)
+        run: android/build-ppcpu.sh "$ANDROID_NDK_LATEST_HOME"
 
       - name: Build APK
         working-directory: android

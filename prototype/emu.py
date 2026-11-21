@@ -85,7 +85,8 @@ class Emulator:
         self.container = os.path.join(os.environ.get('PP_DATA', os.path.expanduser('~/.pocketpear')), name)
         for d in ('Documents', 'Library/Preferences', 'Library/Caches', 'tmp'):
             os.makedirs(os.path.join(self.container, d), exist_ok=True)
-        self.uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
+        from cpu import make_cpu
+        self.uc = make_cpu()
         self.mapped = []                      # (start, end) host bookkeeping for mmap
         self.next_mmap = 0x40000000           # anonymous mmap region search start
         self.trace_sys = bool(os.environ.get('TRACE_SYS'))
