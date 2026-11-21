@@ -61,6 +61,10 @@ class MainActivity : Activity() {
             text = "Import game (.ipa)"
             setOnClickListener { pick(REQ_IPA) }
         }, LinearLayout.LayoutParams(-1, -2))
+        buttons.addView(Button(this).apply {
+            text = "Copy last game's log"
+            setOnClickListener { GameActivity.copyLog(this@MainActivity, py) }
+        }, LinearLayout.LayoutParams(-1, -2))
         root.addView(buttons)
 
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }

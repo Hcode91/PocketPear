@@ -9,7 +9,10 @@ import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.Gravity
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.widget.ImageView
 import android.widget.TextView
 import com.chaquo.python.PyObject
@@ -52,6 +55,12 @@ class GameActivity : Activity() {
         val root = FrameLayout(this)
         root.addView(image, FrameLayout.LayoutParams(-1, -1))
         root.addView(log, FrameLayout.LayoutParams(-1, -2))
+        root.addView(Button(this).apply {
+            text = "Copy log"
+            textSize = 11f
+            alpha = 0.6f
+            setOnClickListener { copyLog(this@GameActivity, py) }
+        }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
         setContentView(root)
         say("Starting ${intent.getStringExtra("name")}... (the first frame takes a few minutes)")
 
@@ -116,6 +125,28 @@ class GameActivity : Activity() {
         val x = ((e.x - ox) / s).coerceIn(0f, frameW - 1f)
         val y = ((e.y - oy) / s).coerceIn(0f, frameH - 1f)
         touches.execute { py.callAttr("touch", kind, x, y) }
+    }
+
+    companion object {
+        /** Puts the run log (see log_text) on the clipboard. Used here and on the main screen. */
+        fun copyLog(a: Activity, py: PyObject) {
+            Thread {
+                val text = try {
+                    py.callAttr("log_text", a.filesDir.absolutePath).toString()
+                } catch (e: Throwable) {
+                    "(could not read the log: ${e.message})"
+                }
+                a.runOnUiThread {
+                    if (text.isEmpty()) {
+                        Toast.makeText(a, "No log yet - run a game first.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val cm = a.getSystemService(android.content.ClipboardManager::class.java)
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("PocketPear log", text))
+                        Toast.makeText(a, "Log copied (${text.length / 1024} KB).", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }.start()
+        }
     }
 
     override fun onDestroy() {

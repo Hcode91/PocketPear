@@ -16,6 +16,7 @@ import zipfile
 
 CACHE_IN_ROOT = 'System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7s'
 _emu = None
+_log = None
 
 
 def setup(files_dir, native_dir, cache_dir):
@@ -230,8 +231,9 @@ class _Log:
 
 def run(files_dir, app_path, listener):
     """Run a game until it exits or stop() is called. Blocks; call it on its own thread."""
-    global _emu
+    global _emu, _log
     log = _Log(os.path.join(files_dir, 'run.log'), listener)
+    _log = log
     old = sys.stdout, sys.stderr
     sys.stdout = sys.stderr = log
     try:
@@ -275,3 +277,27 @@ def stop():
             e.uc.emu_stop()
         except Exception:
             pass
+
+
+def log_text(files_dir, head_lines=150, tail_chars=150_000):
+    """The run log for the clipboard: all of it if it is short, else its start and its end
+    (the start says what was run, the end says how it stopped). The clipboard holds about
+    1 MB, so a long log cannot go whole."""
+    if _log is not None:
+        try:
+            _log.flush()
+        except Exception:
+            pass
+    path = os.path.join(files_dir, 'run.log')
+    try:
+        with open(path, 'r', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        return ''
+    if len(text) <= tail_chars + 20_000:
+        return text
+    head = ''.join(text.splitlines(True)[:head_lines])
+    tail = text[-tail_chars:]
+    tail = tail[tail.find('\n') + 1:]
+    skipped = len(text) - len(head) - len(tail)
+    return f'{head}\n... ({skipped:,} characters left out) ...\n\n{tail}'
