@@ -12,13 +12,24 @@ EPOCH = 1384000000.0          # the guest's wall clock starts here (November 201
 
 
 class Clock:
-    """Guest time. By default it is virtual: each time slice advances it a little and an idle
-    machine jumps straight to its next deadline, so a run is the same every time. With
-    PP_REALTIME set it follows the host clock instead."""
+    """Guest time. Three modes (PP_CLOCK):
+
+    virtual  each time slice advances it a little and an idle machine jumps straight to its next
+             deadline, so a run is the same every time (desktop tests).
+    paced    the same, except an idle jump never takes guest time ahead of real time: when the
+             game would get ahead (a light game, done with its frame early) it waits for the
+             clock on the wall. A game slower than real time is left alone and runs as in
+             virtual mode, without skipping frames to catch up. The phone app uses this.
+    real     follows the host clock (PP_REALTIME=1 also selects it)."""
     def __init__(self):
-        self.real = bool(os.environ.get('PP_REALTIME'))
+        mode = os.environ.get('PP_CLOCK', '').lower()
+        if os.environ.get('PP_REALTIME'):
+            mode = 'real'
+        self.real = mode == 'real'
+        self.paced = mode == 'paced'
         self.t = 0.0
         self.base = time.monotonic()
+        self.sync = (0.0, self.base)           # paced: a guest time and the host time it was at
 
     def now(self):
         if self.real:
@@ -28,8 +39,6 @@ class Clock:
     def tick(self, dt):
         if not self.real:
             self.t += dt
-        else:
-            pass
 
     def wall(self):
         return EPOCH + self.now()
@@ -37,8 +46,22 @@ class Clock:
     def advance_to(self, when):
         if self.real:
             time.sleep(max(0, min(when - self.now(), 0.05)))
-        else:
+            return
+        if not self.paced or when <= self.t:
             self.t = max(self.t, when)
+            return
+        g0, r0 = self.sync
+        due = r0 + (when - g0)                 # the host time this guest time belongs at
+        host = time.monotonic()
+        if due <= host:
+            # behind real time (or level with it): jump, and count from here, so a slow
+            # stretch is never made up for afterwards by running fast
+            self.t = when
+            self.sync = (when, host)
+            return
+        # ahead of real time: wait, a little at a time so input and display stay responsive
+        time.sleep(min(due - host, 0.02))
+        self.t = max(self.t, min(when, g0 + (time.monotonic() - r0)))
 
     def nudge(self):
         """Each time query moves virtual time on a little so loops reading it see it move."""

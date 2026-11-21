@@ -28,6 +28,10 @@ def setup(files_dir, native_dir, cache_dir):
     os.environ['LIBPPCPU_PATH'] = os.path.join(native_dir, 'libppcpu.so')
     os.environ.setdefault('PP_CPU', 'dynarmic')   # the JIT; Unicorn if it cannot load
     os.environ.setdefault('PP_TOUCH_SPACE', 'frame')
+    # never let a light game run faster than real time (slow ones are left as they are)
+    os.environ.setdefault('PP_CLOCK', 'paced')
+    import sched
+    sched.CLOCK.__init__()
     for d in ('firmware', 'apps', 'data'):
         os.makedirs(os.path.join(files_dir, d), exist_ok=True)
 
