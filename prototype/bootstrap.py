@@ -27,6 +27,8 @@ class Bootstrap:
         self.providers['PurpleSystemAppPort'] = lambda: SystemApp(kernel).port
         from services.backboard import HIDServices
         self.providers['com.apple.backboard.hid.services'] = lambda: HIDServices(kernel).port
+        from services.syslog import SysLogger
+        self.providers['com.apple.system.logger'] = lambda: SysLogger(kernel).port
         from services.carender import RenderServer
         self.providers['com.apple.CARenderServer'] = lambda: RenderServer(kernel).port
 

@@ -15,6 +15,7 @@ import time
 from unicorn import (Uc, UcError, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_INTR, UC_HOOK_MEM_UNMAPPED,
                      UC_PROT_ALL, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC, UC_HOOK_CODE)
 from unicorn.arm_const import *
+from sched import CLOCK
 
 PAGE = 0x1000
 STACK_TOP = 0x2f000000
@@ -318,6 +319,11 @@ class Emulator:
             self.uc.hook_add(UC_HOOK_CODE, self.on_break, begin=a, end=a)
         print(f'[emu] exe {exe_host} at {exe_mh:#x}, dyld entry {dyld.entry:#x}, sp {sp:#x}')
 
+    def next_external(self):
+        """The next thing due from outside the guest: a display link tick or a scripted touch."""
+        ds = [d for d in (self.displaylinks.next_due(), self.kernel.touches.next_due()) if d is not None]
+        return min(ds) if ds else None
+
     def preset_screen(self):
         """GraphicsServices caches the main screen's pixel size, scale and orientation, filling
         them from MobileGestalt capabilities on first use. Fill the cache with an iPhone 5's
@@ -474,6 +480,7 @@ class Emulator:
         executed = 0
         while self.kernel.exited is None:
             self.displaylinks.deliver()
+            self.kernel.touches.deliver(CLOCK.now())
             t, state = self.sched.pick()
             if t is None and state == 'external':
                 continue
@@ -513,7 +520,7 @@ class Emulator:
             t.pc = self.uc.reg_read(UC_ARM_REG_PC)
             if time.time() - last_beat > float(os.environ.get('PP_HEARTBEAT', 15)):
                 last_beat = time.time()
-                from sched import CLOCK
+                pass
                 print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls')
                 for th in self.sched.threads:
                     if not th.dead:
@@ -523,7 +530,7 @@ class Emulator:
                             self.backtrace(int(os.environ['PP_BT_THREADS']))
                 if os.environ.get('PP_BT_THREADS'):
                     self.uc.context_restore(t.ctx)
-            from sched import CLOCK
+            pass
             CLOCK.tick(0.0005)
             executed += slice_insns
             if max_insns and executed >= max_insns:

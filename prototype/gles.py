@@ -107,9 +107,16 @@ class GLES:
         self.contexts = {}           # guest EAGLContext -> (host context, api)
         self.current = {}            # thread id -> guest EAGLContext
         self.strings = {}
-        self.attribs = {}            # index -> (size, type, normalized, stride, guest pointer) for client arrays
+        # Client-side vertex arrays and enabled attributes are vertex array object state, so they
+        # are kept per VAO (Unity uses OES_vertex_array_object): vao -> {index: (size, type,
+        # normalized, stride, guest pointer)} and vao -> {enabled indices}.
+        self.vao = 0
+        self.vao_attribs = {0: {}}
+        self.vao_enabled = {0: set()}
         self.mapped = {}             # buffer target -> (guest address, size, host buffer)
+        self.index_shadow = {}       # element array buffer name -> its contents
         self.frame = 0
+        self.draws = self.client_draws = 0     # since the last present
         self.unimplemented = {}
         self.out_dir = os.environ.get('PP_FRAMES', '/tmp/pocketpear-frames')
         os.makedirs(self.out_dir, exist_ok=True)
@@ -165,7 +172,9 @@ class GLES:
                 if core in SCALAR or core in ('glGenFramebuffers', 'glGenRenderbuffers', 'glDeleteFramebuffers',
                                               'glDeleteRenderbuffers') or core in GLES.__dict__:
                     base = core
-            if base in SCALAR:
+            if base in TRACKED:
+                impl = getattr(self, base)
+            elif base in SCALAR:
                 impl = self.scalar(base)
             elif hasattr(self, base):
                 impl = getattr(self, base)
@@ -173,6 +182,8 @@ class GLES:
                 impl = self.missing(base)
             elif name in OBJC:
                 impl = getattr(self, OBJC[name])
+            if impl is not None and os.environ.get('GL_ERRORS') and base.startswith('gl') and base != 'glGetError':
+                impl = self.checked(base, impl)
             if impl is not None:
                 stubs.replace(addr, impl, addr in self.emu.syms.thumb)
                 made += 1
@@ -192,6 +203,18 @@ class GLES:
             r = fn(*vals)
             if rtype != 'v':
                 self.ret(r or 0)
+        return call
+
+    def checked(self, name, impl):
+        """GL_ERRORS=1: report each distinct GL error a call raises (once per call and error)."""
+        seen = self.__dict__.setdefault('_gl_errors', set())
+        get_error = host('glGetError', '', 'u')
+        def call():
+            impl()
+            e = get_error()
+            if e and (name, e) not in seen:
+                seen.add((name, e))
+                print(f'[gles] {name} raised GL error {e:#x} (args {[hex(self.arg(i)) for i in range(4)]})')
         return call
 
     def missing(self, name):
@@ -256,6 +279,7 @@ class GLES:
         every = int(os.environ.get('PP_FRAME_EVERY', 30))
         if self.frame == 1 or self.frame % every == 0:
             self.save_frame()
+        self.draws = self.client_draws = 0
         self.ret(1)
 
     def save_frame(self):
@@ -277,7 +301,7 @@ class GLES:
             img = Image.frombuffer('RGBA', (w, h), bytes(buf), 'raw', 'RGBA', 0, -1)
             path = os.path.join(self.out_dir, f'frame{self.frame:05d}.png')
             img.convert('RGB').save(path)          # the screen is opaque; keep viewers from showing alpha
-            print(f'[gles] frame {self.frame} -> {path}')
+            print(f'[gles] frame {self.frame} -> {path} ({self.draws} draws, {self.client_draws} from client arrays)')
         except Exception as e:
             print('[gles] could not save frame:', e)
 
@@ -328,14 +352,30 @@ class GLES:
             return getattr(self, kind)(h)
         raise AttributeError(name)
 
+    # Index buffers are shadowed: a draw with a bound index buffer but client-side vertex arrays
+    # (Unity's GUI does this) needs the highest index to know how much vertex data to upload.
+    def shadow_write(self, target, off, blob, size=None):
+        if target != 0x8893:                       # GL_ELEMENT_ARRAY_BUFFER
+            return
+        name = self.bound(GL_ELEMENT_ARRAY_BUFFER_BINDING)
+        if size is not None:
+            self.index_shadow[name] = bytearray(size)
+        buf = self.index_shadow.setdefault(name, bytearray())
+        if len(buf) < off + len(blob):
+            buf.extend(bytes(off + len(blob) - len(buf)))
+        buf[off:off + len(blob)] = blob
+
     def glBufferData(self):
         target, size, data, usage = self.args(4)
         blob = self.read(data, size)
         _gl.glBufferData(ctypes.c_uint(target), ctypes.c_ssize_t(size), blob if data else None, ctypes.c_uint(usage))
+        self.shadow_write(target, 0, blob if data else b'', size)
 
     def glBufferSubData(self):
         target, off, size, data = self.args(4)
-        _gl.glBufferSubData(ctypes.c_uint(target), ctypes.c_ssize_t(off), ctypes.c_ssize_t(size), self.read(data, size))
+        blob = self.read(data, size)
+        _gl.glBufferSubData(ctypes.c_uint(target), ctypes.c_ssize_t(off), ctypes.c_ssize_t(size), blob)
+        self.shadow_write(target, off, blob)
 
     def image_size(self, w, h, fmt, typ):
         comps = {0x1906: 1, 0x1909: 1, 0x190A: 2, 0x1907: 3, 0x1908: 4, 0x80E1: 4, 0x1902: 1}.get(fmt, 4)
@@ -538,17 +578,39 @@ class GLES:
         else:
             self.attribs[idx] = (size, typ, norm & 0xff, stride, ptr)
 
+    @property
+    def attribs(self):
+        return self.vao_attribs.setdefault(self.vao, {})
+
+    def glBindVertexArrayOES(self):
+        vao, = self.args(1)
+        host('glBindVertexArray', 'u', 'v')(vao)
+        self.vao = vao
+
+    def glEnableVertexAttribArray(self):
+        idx, = self.args(1)
+        _gl.glEnableVertexAttribArray(idx)
+        self.vao_enabled.setdefault(self.vao, set()).add(idx)
+
+    def glDisableVertexAttribArray(self):
+        idx, = self.args(1)
+        _gl.glDisableVertexAttribArray(idx)
+        self.vao_enabled.setdefault(self.vao, set()).discard(idx)
+
     def upload_client_arrays(self, first, count):
         """Client-side vertex arrays live in guest memory: copy the range a draw reads into a
         temporary host buffer and point the attribute at it."""
-        if not self.attribs:
+        if not any(i in self.vao_enabled.get(self.vao, ()) for i in self.attribs):
             return None
         vbo = ctypes.c_uint()
         _gl.glGenBuffers(1, ctypes.byref(vbo))
         _gl.glBindBuffer(GL_ARRAY_BUFFER, vbo)
         blob = b''
         layout = []
+        enabled = self.vao_enabled.get(self.vao, set())
         for idx, (size, typ, norm, stride, ptr) in self.attribs.items():
+            if idx not in enabled:
+                continue
             elem = size * TYPE_SIZES.get(typ, 4)
             st = stride or elem
             start = ptr + first * st
@@ -570,12 +632,16 @@ class GLES:
 
     def glDrawArrays(self):
         mode, first, count = self.args(3)
+        self.draws += 1
+        self.client_draws += bool(self.attribs)
         vbo = self.upload_client_arrays(first, count)
         _gl.glDrawArrays(mode, first, count)
         self.finish_client_arrays(vbo)
 
     def glDrawElements(self):
         mode, count, typ, indices = self.args(4)
+        self.draws += 1
+        self.client_draws += bool(self.attribs)
         isz = {0x1401: 1, 0x1403: 2, 0x1405: 4}.get(typ, 2)
         ibo = None
         if not self.bound(GL_ELEMENT_ARRAY_BUFFER_BINDING):
@@ -594,7 +660,14 @@ class GLES:
         else:
             vbo = None
             if self.attribs:
-                print('[gles] glDrawElements with an index buffer and client arrays: not handled')
+                buf = self.index_shadow.get(self.bound(GL_ELEMENT_ARRAY_BUFFER_BINDING), b'')
+                data = bytes(buf[indices:indices + count * isz])
+                if len(data) == count * isz and count:
+                    fmt = {1: 'B', 2: 'H', 4: 'I'}[isz]
+                    vbo = self.upload_client_arrays(0, max(struct.unpack(f'<{count}{fmt}', data)) + 1)
+                if os.environ.get('GL_DEBUG'):
+                    print(f'[gles] drawElements ib={self.bound(GL_ELEMENT_ARRAY_BUFFER_BINDING)} off={indices} n={count} '
+                          f'shadow={len(buf)} attribs={self.attribs} max={max(struct.unpack(f"<{count}{fmt}", data)) if vbo else None}', flush=True)
             _gl.glDrawElements(mode, count, typ, ctypes.c_void_p(indices))
         self.finish_client_arrays(vbo)
 
@@ -609,8 +682,46 @@ class GLES:
             f(target, count, arr)
 
     def glResolveMultisampleFramebufferAPPLE(self):
+        """Resolve the multisampled read framebuffer into the draw framebuffer. ES 3 only
+        resolves between identical formats, and iOS games often multisample in RGB565 or RGB8
+        while the screen is RGBA8, so the samples are first resolved into a single-sampled
+        renderbuffer of their own format, which can then be blitted with conversion."""
         w, h = self.screen
+        get_iv = host('glGetFramebufferAttachmentParameteriv', 'uuup', 'v')
+        v = ctypes.c_int()
+        get_iv(0x8CA8, GL_COLOR_ATTACHMENT0, 0x8CD1, ctypes.byref(v))      # attachment object name
+        ms_rb = v.value
+        prev_rb = ctypes.c_int()
+        _gl.glGetIntegerv(GL_RENDERBUFFER_BINDING, ctypes.byref(prev_rb))
+        _gl.glBindRenderbuffer(GL_RENDERBUFFER, ms_rb)
+        fmt, rw, rh = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+        _gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER, 0x8D44, ctypes.byref(fmt))   # internal format
+        _gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER, 0x8D42, ctypes.byref(rw))
+        _gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER, 0x8D43, ctypes.byref(rh))
+        w, h = rw.value or w, rh.value or h
+        key = (fmt.value, w, h)
+        if getattr(self, '_resolve_key', None) != key:
+            if getattr(self, '_resolve_rb', None):
+                _gl.glDeleteRenderbuffers(1, ctypes.byref(self._resolve_rb))
+                _gl.glDeleteFramebuffers(1, ctypes.byref(self._resolve_fb))
+            self._resolve_rb, self._resolve_fb = ctypes.c_uint(), ctypes.c_uint()
+            _gl.glGenRenderbuffers(1, ctypes.byref(self._resolve_rb))
+            _gl.glBindRenderbuffer(GL_RENDERBUFFER, self._resolve_rb)
+            _gl.glRenderbufferStorage(GL_RENDERBUFFER, fmt.value, w, h)
+            _gl.glGenFramebuffers(1, ctypes.byref(self._resolve_fb))
+            self._resolve_key = key
+            print(f'[gles] multisample resolve through a {w}x{h} renderbuffer, format {fmt.value:#x}')
+        _gl.glBindRenderbuffer(GL_RENDERBUFFER, prev_rb.value)
+        read_fb, draw_fb = ctypes.c_int(), ctypes.c_int()
+        _gl.glGetIntegerv(0x8CAA, ctypes.byref(read_fb))      # GL_READ_FRAMEBUFFER_BINDING
+        _gl.glGetIntegerv(0x8CA6, ctypes.byref(draw_fb))      # GL_DRAW_FRAMEBUFFER_BINDING
+        _gl.glBindFramebuffer(0x8CA9, self._resolve_fb)
+        _gl.glFramebufferRenderbuffer(0x8CA9, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, self._resolve_rb.value)
         _gl.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600)
+        _gl.glBindFramebuffer(0x8CA8, self._resolve_fb)
+        _gl.glBindFramebuffer(0x8CA9, draw_fb.value)
+        _gl.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600)
+        _gl.glBindFramebuffer(0x8CA8, read_fb.value)
 
     def glMapBufferOES(self):
         target, access = self.args(2)
@@ -624,7 +735,9 @@ class GLES:
         target, = self.args(1)
         a, size = self.mapped.pop(target, (0, 0))
         if a:
-            _gl.glBufferSubData(target, 0, size, self.read(a, size))
+            blob = self.read(a, size)
+            _gl.glBufferSubData(target, 0, size, blob)
+            self.shadow_write(target, 0, blob)
             self.emu.unmap(a, size)
         self.ret(1)
 
@@ -649,6 +762,8 @@ def fix_shader(src):
 
 
 # Objective-C methods replaced: symbol -> GLES method name
+TRACKED = ('glBindVertexArrayOES', 'glEnableVertexAttribArray', 'glDisableVertexAttribArray')
+
 OBJC = {
     '-[EAGLContext initWithAPI:]': 'eagl_init_with_api',
     '-[EAGLContext initWithAPI:sharegroup:]': 'eagl_init_with_api_sharegroup',

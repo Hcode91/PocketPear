@@ -37,9 +37,16 @@ the backboard stand-in sends the GraphicsServices application-launch event (type
 registers a render context with the CARenderServer stand-in, the app delegate's
 `applicationDidFinishLaunching` runs, preferences are saved in the container, and the game's
 Mono runtime loads `mscorlib` and the game's assemblies, OpenGL ES runs on the host GPU, and the
-game draws its studio logos, title screen and menu backdrop full-screen (1136x640) at 60 frames a
-second of guest time. Core Animation commits arrive at the render server stand-in but are not
-drawn (Unity draws everything itself). No touch input or sound yet.
+game draws its studio logos, title screen and full main menu (1136x640, multisampled) at 60
+frames a second of guest time, and taps reach Unity's view. Core Animation commits arrive at the
+render server stand-in but are not drawn (Unity draws everything itself). No sound yet.
+
+Touches are scripted for now: `PP_TOUCH="t:x,y;t:x,y>x2,y2"` taps (or drags) at guest time t
+seconds, in the screen's portrait points (320x568). They are sent as GraphicsServices hand events
+(type 3001) carrying the app window's render context, as backboardd sends a finger. The game's
+own log (NSLog, ASL, Unity's Debug.Log) is printed as `[log]` lines by a
+`com.apple.system.logger` stand-in, and SpringBoard's `GSCapabilities` shared memory object
+(`prototype/capabilities.py`) answers capability questions as an iPhone 5 would.
 
 `CADisplayLink` is replaced (`prototype/displaylink.py`): without a display server there is no
 vsync, so each tick borrows the main thread while its run loop waits in `mach_msg`, calls the

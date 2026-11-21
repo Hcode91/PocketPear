@@ -34,5 +34,6 @@ class RenderServer(MigServer):
         # (the context ID, and a second one QuartzCore stores beside it).
         ctx = self.next_context
         self.next_context += 1
+        self.k.render_contexts = getattr(self.k, 'render_contexts', []) + [ctx]
         print(f'[carender] client {req.args[:4].hex()} registered, context {ctx:#x}')
         return self.reply(req, data=struct.pack('<II', ctx, 0), ports=[(self.port, 0x11)])

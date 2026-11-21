@@ -88,6 +88,8 @@ class Kernel:
         self.bootstrap = Bootstrap(self)
         from services.backboard import Launcher
         self.launcher = Launcher(self)
+        from services.backboard import Touches
+        self.touches = Touches(self, os.environ.get('PP_TOUCH', ''))
         from mach import MachMsg
         self.mach = MachMsg(self)
 
@@ -493,6 +495,38 @@ class Kernel:
     def sys_fchown(self): self.ret(0)
     def sys_utimes(self): self.ret(0)
     def sys_futimes(self): self.ret(0)
+
+    def sys_shm_open(self):
+        """POSIX shared memory objects, kept as files in a per-run directory. SpringBoard's
+        "GSCapabilities" object is created up front from capabilities.py."""
+        name_p, flags, mode = self.args(3)
+        name = self.emu.cstr(name_p).lstrip('/')
+        d = getattr(self, 'shm_dir', None)
+        if d is None:
+            import tempfile
+            from capabilities import plist_bytes
+            d = self.shm_dir = tempfile.mkdtemp(prefix='pocketpear-shm-')
+            with open(os.path.join(d, 'GSCapabilities'), 'wb') as f:
+                f.write(plist_bytes())
+        host = os.path.join(d, name.replace('/', '_'))
+        hflags = {0: os.O_RDONLY, 1: os.O_WRONLY, 2: os.O_RDWR}[flags & O_ACCMODE]
+        if flags & O_CREAT: hflags |= os.O_CREAT
+        if flags & O_EXCL: hflags |= os.O_EXCL
+        if flags & O_TRUNC: hflags |= os.O_TRUNC
+        try:
+            fd = os.open(host, hflags, mode or 0o644)
+        except OSError as e:
+            self.ret(e.errno, True)
+            return
+        gfd = 3
+        while gfd in self.fds:
+            gfd += 1
+        self.fds[gfd] = (fd, '/shm/' + name)
+        self.log(f'shm_open({name!r}) = {gfd}')
+        self.ret(gfd)
+
+    def sys_flock(self):
+        self.ret(0)                          # one process: advisory locks always succeed
 
     def sys_open(self):
         path_p, flags, mode = self.args(3)
