@@ -569,13 +569,22 @@ class Emulator:
                 last_beat = time.time()
                 pass
                 print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls')
+                # A game that has gone quiet (few calls since the last beat) is usually waiting
+                # for something that never comes: show where each thread waits, a few times.
+                quiet = self.kernel.calls - getattr(self, 'beat_calls', 0) < 20000
+                self.beat_calls = self.kernel.calls
+                bt = int(os.environ.get('PP_BT_THREADS', 0))
+                if not bt and quiet and getattr(self, 'quiet_dumps', 0) < 3:
+                    self.quiet_dumps = getattr(self, 'quiet_dumps', 0) + 1
+                    bt = 10
+                    print('[emu] the game has gone quiet; where each thread waits:')
                 for th in self.sched.threads:
                     if not th.dead:
                         print(f'      {th} at {self.syms.name(getattr(th, "pc", 0))}')
-                        if os.environ.get('PP_BT_THREADS') and th.ctx is not None and th is not t:
+                        if bt and th.ctx is not None and th is not t:
                             self.uc.context_restore(th.ctx)
-                            self.backtrace(int(os.environ['PP_BT_THREADS']))
-                if os.environ.get('PP_BT_THREADS'):
+                            self.backtrace(bt)
+                if bt:
                     self.uc.context_restore(t.ctx)
             pass
             CLOCK.tick(0.0005)
