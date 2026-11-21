@@ -1155,6 +1155,18 @@ class Kernel:
         self.uc.reg_write(UC_ARM_REG_R0, t & 0xffffffff)
         self.uc.reg_write(UC_ARM_REG_R1, t >> 32)
 
+    def trap_mach_wait_until(self):
+        """Sleep until a mach_absolute_time deadline (uint64 in r0:r1). Unreal's frame limiter
+        sleeps with this; answering an error made it spin through its frame wait instead."""
+        from sched import CLOCK
+        deadline = (self.uc.reg_read(UC_ARM_REG_R0) | (self.uc.reg_read(UC_ARM_REG_R1) << 32)) / 24_000_000
+        wait = deadline - CLOCK.now()
+        if wait <= 0:
+            self.mret(0)
+            self.yield_cpu()
+            return
+        self.emu.sched.block('mach_wait_until', lambda: False, lambda timed_out: self.mret(0), wait)
+
     def trap_mach_timebase_info(self):
         p, = self.args(1)
         self.emu.write(p, struct.pack('<II', 125, 3))       # 24 MHz -> ns
