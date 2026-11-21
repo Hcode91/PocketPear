@@ -20,15 +20,16 @@ cp build-unicorn/out/libunicorn.so app/src/main/jniLibs/arm64-v8a/
 "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip app/src/main/jniLibs/arm64-v8a/libunicorn.so
 rm -rf app/build/unicorn-python/unicorn
 cp -r "$SRC/bindings/python/unicorn" app/build/unicorn-python/
-# The binding asks importlib.resources where its own lib/ folder is; inside an APK that can
-# fail. The library comes from LIBUNICORN_PATH (the app's native library folder) anyway.
+# The binding asks importlib.resources where its own lib/ folder is. Inside an APK the answer is
+# an AssetPath, which is not a filesystem path, and Path(AssetPath) throws a TypeError that ends
+# the import. The library comes from LIBUNICORN_PATH (the app's native library folder), so the
+# lookup is dropped.
 python3 - app/build/unicorn-python/unicorn/unicorn_py3/unicorn.py <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
 old = "    canonicals = resources.files('unicorn') / 'lib'\n"
-new = ("    try:\n        canonicals = resources.files('unicorn') / 'lib'\n"
-       "    except Exception:\n        canonicals = None\n")
+new = "    canonicals = None  # PocketPear: an APK has no lib/ folder; LIBUNICORN_PATH is used\n"
 assert old in s, 'unicorn binding changed: update build-unicorn.sh'
 open(p, 'w').write(s.replace(old, new))
 PY
