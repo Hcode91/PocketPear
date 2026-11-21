@@ -235,6 +235,26 @@ class Kernel:
         if self.emu.trace:
             print('[sys]', msg)
 
+    def file_log(self, msg, failed):
+        """Always-on log of the game's own file calls, so a log from a phone says which file a
+        game could not find or open. Failures and successes are capped separately, so a game
+        that opens thousands of files still shows every early failure. System paths are left
+        out: frameworks probe for files that are normally absent."""
+        if self.emu.trace:
+            return                                   # the [sys] line already says it
+        key = 'file_fail' if failed else 'file_ok'
+        n = self.__dict__.get(key, 0)
+        cap = 400 if failed else 300
+        if n < cap:
+            print('[file]', msg)
+        elif n == cap:
+            print(f'[file] ({"failed" if failed else "successful"} file calls no longer logged)')
+        self.__dict__[key] = n + 1
+
+    def game_path(self, path):
+        return path.startswith(('/var/mobile/Applications/', '/private/var/mobile/Applications/')) \
+            or not path.startswith('/')
+
     def unimpl(self, kind, num, name):
         key = (kind, num)
         self.unimplemented[key] = self.unimplemented.get(key, 0) + 1
@@ -611,6 +631,7 @@ class Kernel:
         writing = (flags & O_ACCMODE) != 0 or flags & O_CREAT
         if writing and not path.startswith('/var/mobile/Applications/') and not path.startswith('/tmp') and not path.startswith('/private/var/tmp'):
             self.log(f'open({path!r}) for writing refused')
+            self.file_log(f'open {path} for writing refused (outside the app)', True)
             self.ret(EPERM, True)
             return
         try:
@@ -623,6 +644,8 @@ class Kernel:
                 fd = os.open(host, hflags, (mode & 0o7777 or 0o644) if flags & O_CREAT else 0o644)
         except OSError as e:
             self.log(f'open({path!r}) -> errno {e.errno}')
+            if self.game_path(path):
+                self.file_log(f'open {path} flags {flags:#x} failed: errno {e.errno} ({os.strerror(e.errno)}) host {host}', True)
             self.ret(e.errno, True)
             return
         gfd = 3
@@ -630,6 +653,8 @@ class Kernel:
             gfd += 1
         self.fds[gfd] = (fd, path)
         self.log(f'open({path!r}, {flags:#x}) = {gfd}')
+        if self.game_path(path):
+            self.file_log(f'open {path} flags {flags:#x} = fd {gfd}', False)
         self.ret(gfd)
     sys_open_nocancel = sys_open
 
@@ -789,6 +814,8 @@ class Kernel:
                 st = os.stat(host) if follow else os.lstat(host)
             except OSError as e:
                 self.log(f'stat({path!r}) -> errno {e.errno}')
+                if self.game_path(path):
+                    self.file_log(f'stat {path} failed: errno {e.errno} host {host}', True)
                 self.ret(e.errno, True); return
             self.log(f'stat({path!r}) ok')
         else:
@@ -873,6 +900,8 @@ class Kernel:
         path = self.guest_path(path_p)
         ok = os.path.exists(self.emu.host_path(path))
         self.log(f'access({path!r}) = {ok}')
+        if not ok and self.game_path(path):
+            self.file_log(f'access {path} failed: not found, host {self.emu.host_path(path)}', True)
         if os.environ.get('BT_ON_PATH') and os.environ['BT_ON_PATH'] in path:
             self.emu.backtrace(20)
         self.ret(0) if ok else self.ret(ENOENT, True)
