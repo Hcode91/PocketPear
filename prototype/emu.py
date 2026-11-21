@@ -7,6 +7,7 @@ kernel is imitated: BSD system calls, Mach traps and the commpage.
 
 Usage: emu.py <rootfs> <app bundle dir> [max instructions]
 """
+import bisect
 import os
 import struct
 import sys
@@ -93,27 +94,35 @@ class Emulator:
         self.kernel = Kernel(self)
 
     # -------------------------------------------------------------- memory
+    # self.mapped is kept sorted by start and never overlaps, so a search walks the gaps
     def is_free(self, start, size):
         end = start + size
-        for s, e in self.mapped:
-            if start < e and s < end:
-                return False
-        return True
+        i = bisect.bisect_right(self.mapped, (start, 1 << 64)) - 1
+        if i >= 0 and self.mapped[i][1] > start:
+            return False
+        return i + 1 >= len(self.mapped) or self.mapped[i + 1][0] >= end
 
     def map(self, start, size, prot=UC_PROT_ALL):
         start, size = align_down(start), align_up(size + (start & (PAGE - 1)))
-        # map page ranges that are not mapped yet
-        a = start
-        while a < start + size:
-            if self.is_free(a, PAGE):
-                b = a
-                while b < start + size and self.is_free(b, PAGE):
-                    b += PAGE
-                self.uc.mem_map(a, b - a, prot)
-                self.mapped.append((a, b))
-                a = b
-            else:
-                a += PAGE
+        end = start + size
+        # map the parts of [start, end) that are not mapped yet
+        holes, a = [], start
+        i = max(0, bisect.bisect_right(self.mapped, (start, 1 << 64)) - 1)
+        while a < end and i < len(self.mapped):
+            s, e = self.mapped[i]
+            if e <= a:
+                i += 1; continue
+            if s >= end:
+                break
+            if s > a:
+                holes.append((a, s))
+            a = max(a, e)
+            i += 1
+        if a < end:
+            holes.append((a, end))
+        for a, b in holes:
+            self.uc.mem_map(a, b - a, prot)
+            bisect.insort(self.mapped, (a, b))
 
     def unmap(self, start, size):
         start, end = align_down(start), align_up(start + size)
@@ -128,15 +137,21 @@ class Emulator:
             self.uc.mem_unmap(lo, hi - lo)
             if s < lo: new.append((s, lo))
             if hi < e: new.append((hi, e))
-        self.mapped = new
+        self.mapped = sorted(new)
 
     def find_free(self, size, hint=None):
         size = align_up(size)
-        a = align_up(hint) if hint else self.next_mmap
+        base = align_up(hint) if hint else self.next_mmap
+        step = PAGE * 16                              # candidates stay on 64 KB steps from base
+        a = base
+        i = max(0, bisect.bisect_right(self.mapped, (a, 1 << 64)) - 1)
         while a + size < 0xf0000000:
-            if self.is_free(a, size):
+            while i < len(self.mapped) and self.mapped[i][1] <= a:
+                i += 1
+            if i >= len(self.mapped) or self.mapped[i][0] >= a + size:
                 return a
-            a += PAGE * 16
+            e = self.mapped[i][1]
+            a = base + -(-(e - base) // step) * step      # first step at or past this region
         raise MemoryError('out of guest address space')
 
     def read(self, a, n): return bytes(self.uc.mem_read(a, n))
@@ -540,7 +555,7 @@ class Emulator:
                 for th in self.sched.threads:
                     print('     ', th)
                 break
-        print(f'[emu] ran {time.time() - t0:.1f}s, exit={self.kernel.exited}, threads={len(self.sched.threads)}')
+        print(f'[emu] ran {time.time() - t0:.1f}s, exit={self.kernel.exited}, threads={len(self.sched.threads)} live')
 
 
 def start(rootfs, app):

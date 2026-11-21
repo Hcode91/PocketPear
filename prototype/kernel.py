@@ -375,7 +375,34 @@ class Kernel:
 
     WQ_STACK, WQ_GUARD = 512 * 1024, 0x1000
 
+    WQ_FLAG_THREAD_REUSE = 0x00020000
+
     def wq_thread(self, item, flags):
+        # The kernel parks a worker when its item is done (op 4) and hands the next request to a
+        # parked one, saying so with WQ_FLAG_THREAD_REUSE: libc then keeps its pthread_t, which
+        # stays on libc's list of all threads. Starting a new thread per request instead mapped a
+        # 516 KB stack each time (hundreds a minute), and none was ever freed.
+        parked = self.__dict__.setdefault('wq_parked', [])
+        if parked:
+            t = parked.pop()
+            base = t.wq_stack
+            self_p = base + self.WQ_GUARD + self.WQ_STACK
+            saved = self.uc.context_save()
+            self.uc.context_restore(t.ctx)
+            for r, v in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4),
+                            (self_p, t.port, base + self.WQ_GUARD, item, flags | self.WQ_FLAG_THREAD_REUSE)):
+                self.uc.reg_write(r, v & 0xffffffff)
+            self.uc.reg_write(UC_ARM_REG_SP, self_p - 16)
+            self.uc.reg_write(UC_ARM_REG_LR, 0)
+            self.uc.reg_write(UC_ARM_REG_PC, self.wq_start & ~1)
+            cpsr = self.uc.reg_read(UC_ARM_REG_CPSR)
+            self.uc.reg_write(UC_ARM_REG_CPSR, (cpsr | 0x20) if self.wq_start & 1 else (cpsr & ~0x20))
+            t.ctx = self.uc.context_save()
+            self.uc.context_restore(saved)
+            t.ready = t.complete = t.deadline = None
+            t.why = ''
+            t.name = f'workq {item:#x}'
+            return t
         total = self.WQ_GUARD + self.WQ_STACK + ((self.pthsize + 0xfff) & ~0xfff)
         base = self.emu.find_free(total)
         self.emu.map(base, total)
@@ -388,6 +415,7 @@ class Kernel:
         t.ctx = self.uc.context_save()
         self.uc.context_restore(saved)
         t.pthread = self_p
+        t.wq_stack = base
         return t
 
     def workq_op(self, op, item, affinity, prio):
@@ -397,9 +425,15 @@ class Kernel:
             self.ret(0)
         elif op == 2:                     # WQOPS_QUEUE_REMOVE
             self.ret(0)
-        elif op == 4:                     # WQOPS_THREAD_RETURN: the worker parks; we end it
-            self.cur.dead = True
-            self.uc.emu_stop()
+        elif op == 4:                     # WQOPS_THREAD_RETURN: the worker parks until reused
+            t = self.cur
+            if getattr(t, 'wq_stack', None) is None:
+                t.dead = True
+                self.uc.emu_stop()
+                return
+            self.__dict__.setdefault('wq_parked', []).append(t)
+            t.name = 'workq (parked)'
+            self.emu.sched.block('parked worker', lambda: False, lambda timed_out: None)
         elif op == 8:                     # WQOPS_THREAD_SETCONC
             self.ret(0)
         elif op == 0x10:                  # WQOPS_QUEUE_NEWSPISUPP: yes, libdispatch requires it
@@ -412,14 +446,16 @@ class Kernel:
                 self.emu.backtrace()
             for _ in range(max(1, affinity)):
                 t = self.wq_thread(0, 0x40000 | (prio & 0x1ffff))
-                print(f'[kernel] workq thread {t.tid} (priority {prio & 0xffff}{", overcommit" if prio & 0x10000 else ""})')
+                if self.emu.trace_sys:
+                    print(f'[kernel] workq thread {t.tid} (priority {prio & 0xffff}{", overcommit" if prio & 0x10000 else ""})')
             self.ret(0)
         else:
             self.ret(45, True)            # ENOTSUP
 
     def sys_workq_kernreturn(self):
         op, item, affinity, prio = self.args(4)
-        print(f'[kernel] workq_kernreturn op={op:#x} item={item:#x} affinity={affinity} prio={prio}')
+        if self.emu.trace_sys:
+            print(f'[kernel] workq_kernreturn op={op:#x} item={item:#x} affinity={affinity} prio={prio}')
         self.workq_op(op, item, affinity, prio)
 
     def sys_gettimeofday(self):

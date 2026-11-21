@@ -103,6 +103,11 @@ class Scheduler:
         every thread waits on a deadline; returns None when nothing can ever run again."""
         while True:
             now = CLOCK.now()
+            if any(t.dead for t in self.threads):   # finished threads leave the round
+                cur = self.threads[self.rr % len(self.threads)] if self.threads else None
+                self.threads = [t for t in self.threads if not t.dead]
+                self.ended = getattr(self, 'ended', 0) + 1
+                self.rr = self.threads.index(cur) if cur in self.threads else 0
             n = len(self.threads)
             for i in range(n):
                 t = self.threads[(self.rr + i) % n]
