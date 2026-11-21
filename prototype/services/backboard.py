@@ -115,7 +115,7 @@ class Touches:
 
     def inject(self, kind, x, y, pointer=0):
         """One finger (from the Android app): kind 'down', 'move' or 'up', in frame pixels."""
-        x, y = self.to_screen(x, y, space='frame')
+        x, y = self.to_screen(x, y, space='frame', displayed=True)
         self.update({pointer: (kind, x, y)})
 
     def inject_all(self, ids, xs, ys, lifted=-1):
@@ -123,7 +123,7 @@ class Touches:
         is the pointer that has just gone up (still listed), or -1."""
         changes = {}
         for i, x, y in zip(ids, xs, ys):
-            x, y = self.to_screen(float(x), float(y), space='frame')
+            x, y = self.to_screen(float(x), float(y), space='frame', displayed=True)
             kind = 'up' if i == lifted else ('move' if i in self.live else 'down')
             changes[int(i)] = (kind, x, y)
         for i in list(self.live):             # fingers the app no longer lists have gone
@@ -159,21 +159,27 @@ class Touches:
         self.seq += 1
         self.events.append((CLOCK.now() if at is None else at, self.seq, kind, paths))
 
-    def to_screen(self, x, y, space=None):
-        """Frame pixels of a landscape game -> portrait screen points (320x568, 2x)."""
+    def to_screen(self, x, y, space=None, displayed=False):
+        """Frame pixels -> portrait screen points (320x568 on an iPhone 5, 320x480 for an app
+        run letterboxed). The frame is the app's renderbuffer: the screen times its scale.
+        displayed: the point is on the frame as the app shows it (turned, see display_turn)."""
         space = space or self.space
         if not space.startswith('frame'):
             return x, y
-        try:
-            w, h = self.k.emu.gles.screen
-        except AttributeError:
-            w, h = 1136, 640
-        if w < h:                                     # a portrait game: frame pixels / 2
-            return x / 2, y / 2
-        lx, ly = x / 2, y / 2                         # landscape points
+        g = getattr(self.k.emu, 'gles', None)
+        w, h = g.screen if g else (1136, 640)
+        scale = g.scale if g else 2.0
+        turn = g.display_turn() if g and displayed else None
+        if turn == 'cw':                              # shown turned clockwise: undo it
+            x, y = y, h - x
+        elif turn == 'ccw':
+            x, y = w - y, x
+        if w < h:                                     # a portrait game
+            return x / scale, y / scale
+        lx, ly = x / scale, y / scale                 # landscape points
         if space == 'frame-left' or self.space == 'frame-left':
-            return ly, 568 - lx
-        return 320 - ly, lx
+            return ly, w / scale - lx
+        return h / scale - ly, lx
 
     def next_due(self):
         if not self.k.launcher.sent or self.k.launcher.port is None:

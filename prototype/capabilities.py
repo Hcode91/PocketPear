@@ -35,8 +35,13 @@ IPHONE5 = {
 }
 
 
-def plist_bytes():
-    """The object's contents: a 32-bit length, then that many bytes of XML property list."""
+def plist_bytes(tall=True):
+    """The object's contents: a 32-bit length, then that many bytes of XML property list.
+    tall=False: the 640x960 screen an iPhone 5 shows an app made before it."""
     import struct
-    xml = plistlib.dumps(IPHONE5, fmt=plistlib.FMT_XML)
+    caps = dict(IPHONE5)
+    if not tall:
+        caps['main-screen-height'] = 960
+        caps['screen-dimensions'] = dict(caps['screen-dimensions'], **{'main-screen-height': 960})
+    xml = plistlib.dumps(caps, fmt=plistlib.FMT_XML)
     return struct.pack('<I', len(xml)) + xml

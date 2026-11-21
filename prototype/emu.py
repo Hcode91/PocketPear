@@ -82,6 +82,12 @@ class Emulator:
             info = {}
         self.bundle_id = info.get('CFBundleIdentifier')
         self.info = info
+        # An iPhone 5 runs apps made before it (no 568-point launch image) letterboxed, on a
+        # 320x480-point screen; their code may assume that size (a game that presents only once
+        # its drawing has covered the screen, say).
+        launch = [str(i.get('UILaunchImageSize', '')) for i in info.get('UILaunchImages') or []]
+        self.tall = os.path.exists(os.path.join(self.app_dir, 'Default-568h@2x.png')) or any('568' in l for l in launch)
+        self.screen_points = (320, 568 if self.tall else 480)
         self.container = os.path.join(os.environ.get('PP_DATA', os.path.expanduser('~/.pocketpear')), name)
         for d in ('Documents', 'Library/Preferences', 'Library/Caches', 'tmp'):
             os.makedirs(os.path.join(self.container, d), exist_ok=True)
@@ -272,6 +278,9 @@ class Emulator:
         self.displaylinks = DisplayLinks(self)
         if not os.environ.get('PP_NO_DISPLAYLINK'):
             self.displaylinks.install(self.stubs)
+        from audio import AudioQueues
+        self.audio = AudioQueues(self)
+        self.audio.install(self.stubs)
         print(f'[emu] {len(self.syms.addrs)} symbols')
 
         # commpage
@@ -344,14 +353,15 @@ class Emulator:
     def preset_screen(self):
         """GraphicsServices caches the main screen's pixel size, scale and orientation, filling
         them from MobileGestalt capabilities on first use. Fill the cache with an iPhone 5's
-        (640x1136 pixels at 2x, portrait) so UIScreen, and every game that sizes its view from it,
-        sees the right screen. The addresses are the iOS 6.1.4 (10B350) GraphicsServices' own."""
+        (640x1136 pixels at 2x, portrait, or 640x960 for an app run letterboxed) so UIScreen, and
+        every game that sizes its view from it, sees the right screen. The addresses are the iOS 6.1.4 (10B350) GraphicsServices' own."""
         pixels, scale = 0x3A31D450, 0x3A31EE6C
         try:
             if self.syms.name(0x34c97c88).startswith('_GSMainScreenPixelSize'):
-                self.write(pixels, struct.pack('<ii', 640, 1136))
+                pw, ph = self.screen_points[0] * 2, self.screen_points[1] * 2
+                self.write(pixels, struct.pack('<ii', pw, ph))
                 self.write(scale, struct.pack('<fi', 2.0, 0))
-                print('[emu] main screen 640x1136 at 2x')
+                print(f'[emu] main screen {pw}x{ph} at 2x' + ('' if self.tall else ' (letterboxed, as an older app)'))
         except Exception as e:
             print('[emu] could not preset the screen size:', e)
         # UIScreen takes its metrics from CADisplay, which has no display list without a
@@ -366,7 +376,15 @@ class Emulator:
             # methods returning a CGRect take the result pointer in r0 and self in r1
             obj = uc.reg_read(UC_ARM_REG_R1 if address in rect_methods else UC_ARM_REG_R0)
             if obj:
-                self.write(obj + 8, struct.pack('<fffff', 0.0, 0.0, 320.0, 568.0, 2.0))
+                self.write(obj + 8, struct.pack('<fffff', 0.0, 0.0, float(self.screen_points[0]),
+                                                float(self.screen_points[1]), 2.0))
+        # CAEAGLLayer's renderbuffer is its bounds times its contentsScale, which stays 1 unless
+        # the app raises it (an app made before Retina never does).
+        def on_scale(uc, address, size, data):
+            self.gles.layer_scale[uc.reg_read(UC_ARM_REG_R0)] = struct.unpack('<f', struct.pack('<I', uc.reg_read(UC_ARM_REG_R2)))[0]
+        a = names.get('-[CALayer setContentsScale:] (QuartzCore)')
+        if a is not None:
+            self.uc.hook_add(UC_HOOK_CODE, on_scale, begin=a, end=a)
         for m in ('-[UIScreen bounds]', '-[UIScreen scale]', '-[UIScreen _scale]', '-[UIScreen _boundsInPixels]',
                   '-[UIScreen _realDisplayBounds]', '-[UIScreen applicationFrame]',
                   '-[UIScreen _applicationFrameForInterfaceOrientation:]', '-[UIScreen currentMode]'):
@@ -567,7 +585,7 @@ def start(rootfs, app):
         exe_name = plistlib.load(open(os.path.join(app, 'Info.plist'), 'rb'))['CFBundleExecutable']
     except Exception:
         exe_name = os.path.basename(app.rstrip('/')).rsplit('.', 1)[0]
-    emu.setup([emu.app_guest + '/' + exe_name], ['HOME=' + CONTAINER, 'TMPDIR=' + CONTAINER + '/tmp/', 'IPHONE_SHARED_RESOURCES_DIRECTORY=/var/mobile', 'USER=mobile', 'LOGNAME=mobile', 'SHELL=/bin/sh', 'DYLD_PRINT_LIBRARIES=1' if os.environ.get('DYLD_LIBS') else 'X=1'])
+    emu.setup([emu.app_guest + '/' + exe_name], ['HOME=' + CONTAINER, 'CFFIXED_USER_HOME=' + CONTAINER, 'TMPDIR=' + CONTAINER + '/tmp/', 'IPHONE_SHARED_RESOURCES_DIRECTORY=/var/mobile', 'USER=mobile', 'LOGNAME=mobile', 'SHELL=/bin/sh', 'DYLD_PRINT_LIBRARIES=1' if os.environ.get('DYLD_LIBS') else 'X=1'])
     return emu
 
 

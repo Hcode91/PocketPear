@@ -553,7 +553,7 @@ class Kernel:
             from capabilities import plist_bytes
             d = self.shm_dir = tempfile.mkdtemp(prefix='pocketpear-shm-')
             with open(os.path.join(d, 'GSCapabilities'), 'wb') as f:
-                f.write(plist_bytes())
+                f.write(plist_bytes(getattr(self.emu, 'tall', True)))
         host = os.path.join(d, name.replace('/', '_'))
         hflags = {0: os.O_RDONLY, 1: os.O_WRONLY, 2: os.O_RDWR}[flags & O_ACCMODE]
         if flags & O_CREAT: hflags |= os.O_CREAT
@@ -969,9 +969,11 @@ class Kernel:
         # A fixed 16 GB disk, as an iPhone 5, rather than the host's: Android's / is a read-only
         # system partition that can report its counts as "unlimited" (all ones), which Python
         # reads as -1, and the guest has no business seeing the host's disk anyway.
+        # Free space stays under 2 GB: games of the time read NSFileSystemFreeSize with intValue,
+        # and 8 GB truncates to exactly 0 (SvR 2010 then refuses to save).
         name = b'hfs'
         blocks = (16 << 30) // 4096
-        free = (8 << 30) // 4096
+        free = (1536 << 20) // 4096
         return struct.pack('<IiQQQQQiiIIII16s1024s1024s32s', 4096, 1 << 20, blocks, free, free,
                            1 << 20, 1 << 19, 0x1000001, 0x1000001, 501, 0x11, 0x1000, 0, name,
                            b'/private/var', b'/dev/disk0s1s2', b'')

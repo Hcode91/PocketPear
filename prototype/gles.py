@@ -120,6 +120,9 @@ class GLES:
         self.uc = emu.uc
         self.display = None
         self.contexts = {}           # guest EAGLContext -> (host context, api)
+        self.api = 2                 # of the current context
+        from gles1 import ES1
+        self.es1 = ES1(self)
         self.current = {}            # thread id -> guest EAGLContext
         self.strings = {}
         # Client-side vertex arrays and enabled attributes are vertex array object state, so they
@@ -141,7 +144,11 @@ class GLES:
             os.makedirs(self.out_dir, exist_ok=True)
         landscape = any('Landscape' in str(o) for o in (emu.info.get('UISupportedInterfaceOrientations') or [])) \
             if not str(emu.info.get('UIInterfaceOrientation', '')).endswith('Portrait') else False
-        self.screen = (1136, 640) if landscape else (640, 1136)
+        self.landscape = landscape
+        self.layer_scale = {}        # CAEAGLLayer -> contentsScale, when the app set one
+        w, h = getattr(emu, 'screen_points', (320, 568))
+        self.scale = 2.0
+        self.screen = (h * 2, w * 2) if landscape else (w * 2, h * 2)
 
     # ------------------------------------------------------------------------ plumbing
     def arg(self, n):
@@ -189,10 +196,12 @@ class GLES:
         ctx = self.contexts.get(guest_ctx, (None,))[0] if guest_ctx else None
         surf = ctypes.c_void_p(self.surface) if self.surface and ctx else None
         _egl.eglMakeCurrent(ctypes.c_void_p(self.display), surf, surf, ctypes.c_void_p(ctx) if ctx else None)
+        self.api = self.contexts.get(guest_ctx, (None, 2))[1] if guest_ctx else self.api
 
     # ------------------------------------------------------------------------ install
     def install(self, stubs, syms):
         """syms: name -> address for OpenGLES.framework; thumb: set of Thumb addresses."""
+        ES1_NAMES.update(_es1_names())
         made = 0
         for name, addr in syms.items():
             impl = None
@@ -213,12 +222,42 @@ class GLES:
                 impl = self.missing(base)
             elif name in OBJC:
                 impl = getattr(self, OBJC[name])
+            if base in ES1_NAMES:
+                impl = self.by_api(base, impl or self.missing(base))
             if impl is not None and os.environ.get('GL_ERRORS') and base.startswith('gl') and base != 'glGetError':
                 impl = self.checked(base, impl)
+            if impl is not None and os.environ.get('PP_GL_FIRST'):
+                impl = self.first_call(base, impl)
             if impl is not None:
                 stubs.replace(addr, impl, addr in self.emu.syms.thumb)
                 made += 1
         print(f'[gles] {made} OpenGL ES entry points replaced')
+
+    def first_call(self, name, impl):
+        """PP_GL_FIRST=1: say when each GL entry point is first called, and how often since."""
+        seen = self.__dict__.get('_gl_counts')
+        if seen is None:
+            seen = self._gl_counts = {}
+            import atexit
+            atexit.register(lambda: print('[gles] calls: ' + ', '.join(f'{k} {v}' for k, v in
+                                                                       sorted(seen.items(), key=lambda kv: -kv[1]))))
+        def call():
+            n = seen.get(name, 0)
+            seen[name] = n + 1
+            if n == 0:
+                print(f'[gles] first call: {name} (api {self.api})')
+            impl()
+        return call
+
+    def by_api(self, name, es2_impl):
+        """A call ES 1 answers differently (or only ES 1 has), routed by the current context."""
+        es1_impl = getattr(self.es1, name)
+        def call():
+            if self.api == 1:
+                es1_impl()
+            else:
+                es2_impl()
+        return call
 
     def scalar(self, name):
         spec = SCALAR[name]
@@ -263,7 +302,8 @@ class GLES:
         self.ensure_display()
         if api not in (1, 2):
             self.ret(0); return
-        version = (ctypes.c_int * 3)(0x3098, 2 if api == 2 else 1, 0x3038)
+        # an ES 1 context is an ES 3 one too: gles1 draws its fixed-function state with shaders
+        version = (ctypes.c_int * 3)(0x3098, 2, 0x3038)
         ctx = _egl.eglCreateContext(ctypes.c_void_p(self.display), self.config, ctypes.c_void_p(self.share), version)
         if not ctx:
             print('[gles] host context creation failed')
@@ -297,9 +337,22 @@ class GLES:
     def eagl_dealloc(self):
         self.ret(0)
 
+    def display_turn(self):
+        """How the host has to turn a frame to show it upright: 'cw', 'ccw' or None. Apps made
+        before UIKit rotated GL views draw landscape games into a portrait renderbuffer, turned
+        for the way the phone is held (Info.plist's UIInterfaceOrientation)."""
+        w, h = self.screen
+        o = str(self.emu.info.get('UIInterfaceOrientation', ''))
+        if w >= h or 'Landscape' not in o:
+            return None
+        return 'cw' if o.endswith('LandscapeLeft') else 'ccw'
+
     def eagl_storage_from_drawable(self):
         guest, _cmd, target, layer = self.args(4)
-        w, h = self.screen
+        pw, ph = getattr(self.emu, 'screen_points', (320, 568))
+        self.scale = self.layer_scale.get(layer, 1.0) or 1.0
+        w, h = int(round((ph if self.landscape else pw) * self.scale)), int(round((pw if self.landscape else ph) * self.scale))
+        self.screen = (w, h)
         _gl.glRenderbufferStorage(target, 0x8058, w, h)      # GL_RGBA8_OES
         print(f'[gles] renderbuffer storage from drawable {layer:#x}: {w}x{h}')
         self.ret(1)
@@ -807,6 +860,14 @@ class GLES:
     def glInsertEventMarkerEXT(self): self.ret(0)
     def glPushGroupMarkerEXT(self): self.ret(0)
     def glPopGroupMarkerEXT(self): self.ret(0)
+
+
+def _es1_names():
+    import gles1
+    return gles1.NAMES
+
+
+ES1_NAMES = set()
 
 
 def bgra_to_rgba(data):

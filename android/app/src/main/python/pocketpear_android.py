@@ -249,7 +249,11 @@ def run(files_dir, app_path, listener):
         def sink(rgba, w, h):
             frames[0] += 1
             img = np.frombuffer(rgba, np.uint8).reshape(h, w, 4)[::-1]   # GL rows are bottom-up
-            listener.onFrame(img.tobytes(), w, h)
+            turn = e.gles.display_turn()
+            if turn:                       # a landscape game drawn into a portrait renderbuffer
+                img = np.rot90(img, -1 if turn == 'cw' else 1)
+                w, h = h, w
+            listener.onFrame(np.ascontiguousarray(img).tobytes(), w, h)
 
         e.gles.frame_sink = sink
         e.run(0)
