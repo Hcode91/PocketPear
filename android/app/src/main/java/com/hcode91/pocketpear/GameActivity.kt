@@ -41,6 +41,7 @@ class GameActivity : Activity() {
     @Volatile private var pending: ByteArray? = null
     private lateinit var root: FrameLayout
     private lateinit var movieView: TextureView
+    private var movieSurface: Surface? = null
     private var player: MediaPlayer? = null
     private var playerId = 0
     private var movieRect: IntArray? = null      // x, y, w, h in frame pixels, and the frame's w, h
@@ -174,10 +175,13 @@ class GameActivity : Activity() {
                         }
                         true
                     }
-                    attachSurface(mp)
+                    // A fresh view per movie: reusing one after its player was released left the
+                    // last movie's final frame on screen while the next one played unseen
+                    // (Bioshock's menu backdrop stayed up through its whole opening movie).
+                    freshMovieView()
                     movieView.visibility = View.VISIBLE
                     placeMovie()
-                    mp.prepareAsync()
+                    attachSurface(mp)
                 } catch (e: Exception) {
                     say("Movie could not play: ${e.message}")
                     releasePlayer()
@@ -192,25 +196,39 @@ class GameActivity : Activity() {
         }
     }
 
+    /** Gives the player the movie view's surface and prepares it once the surface exists
+     *  (a player prepared without one can lose its picture on some devices). */
     private fun attachSurface(mp: MediaPlayer) {
-        val st = movieView.surfaceTexture
-        if (st != null) {
-            mp.setSurface(Surface(st))
-            return
+        fun begin(t: SurfaceTexture) {
+            if (player !== mp) return
+            val surface = Surface(t)
+            movieSurface = surface
+            mp.setSurface(surface)
+            mp.prepareAsync()
         }
+        val st = movieView.surfaceTexture
+        if (st != null) { begin(st); return }
         movieView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(t: SurfaceTexture, w: Int, h: Int) {
-                player?.setSurface(Surface(t))
-            }
+            override fun onSurfaceTextureAvailable(t: SurfaceTexture, w: Int, h: Int) = begin(t)
             override fun onSurfaceTextureSizeChanged(t: SurfaceTexture, w: Int, h: Int) {}
             override fun onSurfaceTextureDestroyed(t: SurfaceTexture) = true
             override fun onSurfaceTextureUpdated(t: SurfaceTexture) {}
         }
     }
 
+    /** Replaces the movie view with a new, empty one in the same place in the layout. */
+    private fun freshMovieView() {
+        val index = root.indexOfChild(movieView)
+        root.removeView(movieView)
+        movieView = TextureView(this).apply { visibility = View.INVISIBLE }
+        root.addView(movieView, index.coerceAtLeast(0), FrameLayout.LayoutParams(0, 0))
+    }
+
     private fun releasePlayer() {
         player?.let { try { it.stop() } catch (_: Exception) {}; it.release() }
         player = null
+        movieSurface?.release()
+        movieSurface = null
         movieView.visibility = View.INVISIBLE
     }
 
