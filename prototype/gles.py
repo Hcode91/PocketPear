@@ -104,6 +104,20 @@ DEVICE_STRINGS = {
         'GL_IMG_texture_compression_pvrtc']),
 }
 
+# The iPhone 5's (PowerVR SGX 543MP3, iOS 6) limits, never more than the host's.
+DEVICE_LIMITS = {
+    0x8872: 8,       # MAX_TEXTURE_IMAGE_UNITS
+    0x8B4D: 8,       # MAX_COMBINED_TEXTURE_IMAGE_UNITS
+    0x8B4C: 8,       # MAX_VERTEX_TEXTURE_IMAGE_UNITS
+    0x8869: 16,      # MAX_VERTEX_ATTRIBS
+    0x8DFB: 128,     # MAX_VERTEX_UNIFORM_VECTORS
+    0x8DFD: 64,      # MAX_FRAGMENT_UNIFORM_VECTORS
+    0x8DFC: 8,       # MAX_VARYING_VECTORS
+    0x0D33: 4096,    # MAX_TEXTURE_SIZE
+    0x851C: 4096,    # MAX_CUBE_MAP_TEXTURE_SIZE
+    0x84E8: 4096,    # MAX_RENDERBUFFER_SIZE
+}
+
 GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER = 0x8892, 0x8893
 GL_ARRAY_BUFFER_BINDING, GL_ELEMENT_ARRAY_BUFFER_BINDING = 0x8894, 0x8895
 GL_FRAMEBUFFER, GL_RENDERBUFFER, GL_COLOR_ATTACHMENT0 = 0x8D40, 0x8D41, 0x8CE0
@@ -132,6 +146,15 @@ class GLES:
         self.vao = 0
         self.vao_attribs = {0: {}}
         self.vao_enabled = {0: set()}
+        self.empty_textures = set()   # PP_GL_EMPTYTEX: textures given storage but no pixels
+        self.shader_sources = {}     # shader name -> the source given to the host
+        self.texture_targets = {}    # texture name -> the target it was bound to
+        self.retired = set()         # texture names the app deleted (kept, emptied: see retire_textures)
+        self.warned_retired = False
+        self.ctx_state = {}          # guest EAGLContext -> its (vao, vao_attribs, vao_enabled)
+        self.host_guest = None       # the guest context current on the host
+        self.host_tid = None         # the guest thread the host context was last chosen for
+        self.context_switches = 0
         self.mapped = {}             # buffer target -> (guest address, size, host buffer)
         self.index_shadow = {}       # element array buffer name -> its contents
         self.frame = 0
@@ -195,7 +218,32 @@ class GLES:
             self.surface = _egl.eglCreatePbufferSurface(ctypes.c_void_p(d), cfg, pb)
         print(f'[gles] host EGL {maj.value}.{mi.value}, screen {self.screen[0]}x{self.screen[1]}')
 
+    def on_own_context(self, impl):
+        """Runs a GL call on the context current on the calling guest thread. EAGL keeps a
+        current context per thread, but the host runs every guest thread on one thread of its
+        own: when the scheduler switches from a thread drawing on one context to one loading
+        textures on another, the host's current context has to follow, or the second thread's
+        binds land in the first's state (Bioshock's water drawn with a painting's texture)."""
+        def call():
+            tid = self.emu.sched.cur.tid
+            if tid != self.host_tid:
+                want = self.current.get(tid)
+                if want and want != self.host_guest:
+                    self.make_current(want)
+                    self.context_switches += 1
+                    if self.context_switches == 1:
+                        print(f'[gles] guest threads draw on different contexts; the host context follows the thread')
+                self.host_tid = tid
+            impl()
+        return call
+
     def make_current(self, guest_ctx):
+        if guest_ctx != self.host_guest:
+            # Vertex array state is per context: keep each context's own
+            self.ctx_state[self.host_guest] = (self.vao, self.vao_attribs, self.vao_enabled)
+            self.vao, self.vao_attribs, self.vao_enabled = self.ctx_state.get(guest_ctx, (0, {0: {}}, {0: set()}))
+            self.host_guest = guest_ctx
+        self.host_tid = self.emu.sched.cur.tid if getattr(self.emu, 'sched', None) else None
         ctx = self.contexts.get(guest_ctx, (None,))[0] if guest_ctx else None
         surf = ctypes.c_void_p(self.surface) if self.surface and ctx else None
         _egl.eglMakeCurrent(ctypes.c_void_p(self.display), surf, surf, ctypes.c_void_p(ctx) if ctx else None)
@@ -232,6 +280,7 @@ class GLES:
             if impl is not None and os.environ.get('PP_GL_FIRST'):
                 impl = self.first_call(base, impl)
             if impl is not None:
+                impl = self.on_own_context(impl)
                 stubs.replace(addr, impl, addr in self.emu.syms.thumb)
                 made += 1
         print(f'[gles] {made} OpenGL ES entry points replaced')
@@ -478,6 +527,37 @@ class GLES:
             fn(n, arr)
         return call
 
+    def glBindTexture(self):
+        target, name = self.args(2)
+        if name:
+            self.texture_targets[name] = target
+            if name in self.retired and not self.warned_retired:
+                self.warned_retired = True
+                print(f'[gles] the app binds texture {name} after deleting it (it stays an empty texture)')
+        _gl.glBindTexture(target, name)
+
+    def retire_textures(self):
+        """glDeleteTextures, the way iOS behaves for an app that keeps using a deleted name:
+        iOS hands out texture names in order and does not give a deleted one out again soon,
+        while Android drivers reuse them at once, so a stale name the app still binds would show
+        whatever texture got the name next (Bioshock's water showed a painting). The texture's
+        storage is freed (made 1x1, empty) but the name is kept, so the host never reuses it."""
+        n, p = self.args(2)
+        names = struct.unpack(f'<{n}I', self.read(p, 4 * n)) if n > 0 else ()
+        empty = bytes(4)
+        for name in names:
+            if not name or name in self.retired:
+                continue
+            target = self.texture_targets.pop(name, 0x0DE1)
+            binding = 0x8514 if target == 0x8513 else 0x8069       # TEXTURE_BINDING_CUBE_MAP / _2D
+            prev = self.bound(binding)
+            _gl.glBindTexture(target, name)
+            faces = range(0x8515, 0x851B) if target == 0x8513 else (0x0DE1,)
+            for face in faces:
+                _gl.glTexImage2D(face, 0, 0x1908, 1, 1, 0, 0x1908, 0x1401, empty)
+            _gl.glBindTexture(target, prev if prev != name else 0)
+            self.retired.add(name)
+
     def __getattr__(self, name):
         table = {'glGenBuffers': ('gen', 'glGenBuffers'), 'glGenTextures': ('gen', 'glGenTextures'),
                  'glGenFramebuffers': ('gen', 'glGenFramebuffers'), 'glGenRenderbuffers': ('gen', 'glGenRenderbuffers'),
@@ -486,6 +566,8 @@ class GLES:
                  'glDeleteFramebuffers': ('delete', 'glDeleteFramebuffers'),
                  'glDeleteRenderbuffers': ('delete', 'glDeleteRenderbuffers'),
                  'glDeleteVertexArraysOES': ('delete', 'glDeleteVertexArrays')}
+        if name == 'glDeleteTextures':
+            return self.retire_textures
         if name in table:
             kind, h = table[name]
             return getattr(self, kind)(h)
@@ -530,7 +612,21 @@ class GLES:
         data = self.read(pixels, self.image_size(w, h, fmt, typ))
         if fmt == 0x80E1:                              # BGRA: swap to RGBA for the host
             data, fmt, ifmt = bgra_to_rgba(data), 0x1908, 0x1908
+        given = pixels
+        if not pixels and 0 < w * h <= 4096 * 4096:
+            # Storage with no pixels starts out zero on iOS; Android drivers hand back whatever
+            # the memory last held (Bioshock's empty second lightmap showed an old painting
+            # across the water), so the host is given zeros.
+            data = bytes(self.image_size(w, h, fmt, typ))
+            pixels = 1
         _gl.glTexImage2D(target, level, ifmt, w, h, border, fmt, typ, data if pixels else None)
+        if level == 0 and os.environ.get('PP_GL_EMPTYTEX'):
+            t = self.bound(0x8514 if 0x8515 <= target <= 0x851A else 0x8069)
+            if given:
+                self.empty_textures.discard(t)
+            else:
+                self.empty_textures.add(t)
+                print(f'[gles] texture {t} allocated {w}x{h} fmt {fmt:#x} type {typ:#x} with no data')
 
     def glTexSubImage2D(self):
         target, level, x, y, w, h, fmt, typ, pixels = self.args(9)
@@ -569,8 +665,56 @@ class GLES:
             else:
                 parts.append(self.read(sp, ln))
         src = fix_shader(b''.join(parts))
+        self.shader_sources[shader] = src
+        dump = os.environ.get('PP_SHADER_DUMP')
+        if dump:
+            os.makedirs(dump, exist_ok=True)
+            with open(os.path.join(dump, f'shader{len(os.listdir(dump)):04d}_{shader}.glsl'), 'wb') as f:
+                f.write(src)
         arr = (ctypes.c_char_p * 1)(src)
         _gl.glShaderSource(shader, 1, arr, None)
+
+    def glCompileShader(self):
+        """Compiles, and says so when the host's compiler refuses a shader the app's (Apple's)
+        took: the program built from it then fails to link, and its draws use whatever program
+        was in use before, with that program's textures (no error the app would see)."""
+        shader, = self.args(1)
+        _gl.glCompileShader(shader)
+        ok = ctypes.c_int()
+        _gl.glGetShaderiv(shader, 0x8B81, ctypes.byref(ok))          # COMPILE_STATUS
+        if not ok.value:
+            self.report_shader_failure('shader', shader, self.shader_sources.get(shader, b''),
+                                       host('glGetShaderInfoLog', 'uipp', 'v'))
+
+    def glLinkProgram(self):
+        prog, = self.args(1)
+        _gl.glLinkProgram(prog)
+        ok = ctypes.c_int()
+        _gl.glGetProgramiv(prog, 0x8B82, ctypes.byref(ok))           # LINK_STATUS
+        if not ok.value:
+            self.report_shader_failure('program', prog, b'', host('glGetProgramInfoLog', 'uipp', 'v'))
+
+    def report_shader_failure(self, what, name, src, get_log):
+        self.shader_failures = getattr(self, 'shader_failures', 0) + 1
+        n = self.shader_failures
+        log = b''
+        if get_log:
+            buf = ctypes.create_string_buffer(2048)
+            ln = ctypes.c_int()
+            get_log(name, 2048, ctypes.byref(ln), buf)
+            log = buf.value
+        if n <= 4:
+            print(f'[gles] the host refused {what} {name}: {log.decode("utf-8", "replace").strip()[:800]}')
+            if src:
+                lines = src.split(b'\n')
+                import re
+                for m in re.finditer(rb'(\d+):(\d+)', log):
+                    i = int(m.group(2))
+                    if 0 < i <= len(lines):
+                        print(f'[gles]   line {i}: {lines[i - 1].decode("utf-8", "replace").strip()[:200]}')
+                        break
+        elif n in (10, 100, 1000):
+            print(f'[gles] {n} shaders or programs refused by the host so far')
 
     def get_iv(self, hostname, nargs, count=1):
         fn = getattr(_gl, hostname)
@@ -587,6 +731,10 @@ class GLES:
         pname, out = self.args(2)
         buf = (ctypes.c_int * 16)()
         _gl.glGetIntegerv(pname, buf)
+        if pname in DEVICE_LIMITS:
+            # The iPhone's limits, not the host's: a game sizes tables and picks texture units
+            # from them, and should do what it did on the hardware it was made for.
+            buf[0] = min(buf[0], DEVICE_LIMITS[pname]) if buf[0] else DEVICE_LIMITS[pname]
         self.emu.write(out, bytes(buf)[:4 * GET_COUNTS.get(pname, 1)])
 
     def glGetFloatv(self):
@@ -776,7 +924,25 @@ class GLES:
         _gl.glDrawArrays(mode, first, count)
         self.finish_client_arrays(vbo)
 
+    def check_empty_textures(self):
+        if not self.empty_textures:
+            return
+        active = self.bound(0x84E0)
+        for unit in range(8):
+            _gl.glActiveTexture(0x84C0 + unit)
+            t = self.bound(0x8069)
+            if t in self.empty_textures:
+                prog = self.bound(0x8B8D)
+                key = (t, unit, prog)
+                if key not in self.empty_seen:
+                    self.empty_seen.add(key)
+                    print(f'[gles] frame {self.frame}: program {prog} draws with texture {t} on unit {unit}, which holds no pixels')
+        _gl.glActiveTexture(active)
+
     def glDrawElements(self):
+        if self.empty_textures:
+            self.empty_seen = getattr(self, 'empty_seen', set())
+            self.check_empty_textures()
         mode, count, typ, indices = self.args(4)
         self.draws += 1
         self.client_draws += bool(self.attribs)
@@ -944,7 +1110,7 @@ def fix_shader(src):
 
 
 # Objective-C methods replaced: symbol -> GLES method name
-TRACKED = ('glBindVertexArrayOES', 'glEnableVertexAttribArray', 'glDisableVertexAttribArray')
+TRACKED = ('glBindVertexArrayOES', 'glBindTexture', 'glCompileShader', 'glLinkProgram', 'glEnableVertexAttribArray', 'glDisableVertexAttribArray')
 
 OBJC = {
     '-[EAGLContext initWithAPI:]': 'eagl_init_with_api',
