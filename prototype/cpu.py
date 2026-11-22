@@ -53,6 +53,12 @@ def lib():
             ('ppcpu_stop', None, [P])]:
             f = getattr(L, name)
             f.restype, f.argtypes = res, args
+        # newer libraries: r0-r15 in place, and a PVRTC decoder (older ones lack them)
+        for name, res, args in [('ppcpu_regs', pu32, [P]),
+                                ('ppcpu_pvrtc', None, [ctypes.c_char_p, U32, I, I, I, P])]:
+            f = getattr(L, name, None)
+            if f is not None:
+                f.restype, f.argtypes = res, args
         _lib = L
     return _lib
 
@@ -101,6 +107,11 @@ class DynUc:
         self.stopping = False
         self.i0, self.i1 = ctypes.c_uint32(), ctypes.c_uint32()
         self.warned = set()
+        # r0-r14 read and written in place when the library allows (a ctypes call each is the
+        # emulator's biggest single overhead after running guest code)
+        self.regs = None
+        if hasattr(self.L, 'ppcpu_regs'):
+            self.regs = (ctypes.c_uint32 * 16).from_address(ctypes.addressof(self.L.ppcpu_regs(self.h).contents))
 
     def _warn(self, what):
         if what not in self.warned:
@@ -130,6 +141,8 @@ class DynUc:
     # registers
     def reg_read(self, reg):
         i = REGS.get(reg)
+        if i is not None and i < 15 and self.regs is not None:
+            return self.regs[i]
         if i is None:
             if reg not in IGNORED:
                 self._warn(f'read of unsupported register {reg}')
@@ -143,6 +156,9 @@ class DynUc:
                 self._warn(f'write of unsupported register {reg}')
             return
         value &= 0xffffffff
+        if i < 15 and self.regs is not None:
+            self.regs[i] = value
+            return
         if i == 15:   # as Unicorn: bit 0 of a PC write selects Thumb
             cpsr = self.L.ppcpu_reg(self.h, 16)
             self.L.ppcpu_set_reg(self.h, 16, (cpsr & ~0x20) | ((value & 1) << 5))

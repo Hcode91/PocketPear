@@ -213,9 +213,10 @@ class Compositor:
 
     def take(self, drawn):
         img = np.frombuffer(self.emu.read(self.buf, self.w * self.h * 4), np.uint8).reshape(self.h, self.w, 4).copy()
-        key = (img[:, :, 0] == KEY[0]) & (img[:, :, 1] == KEY[1]) & (img[:, :, 2] == KEY[2]) & (img[:, :, 3] == KEY[3])
         from movie import MOVIE_KEY
-        hole = (img[:, :, 0] == MOVIE_KEY[0]) & (img[:, :, 1] == MOVIE_KEY[1]) & (img[:, :, 2] == MOVIE_KEY[2]) & (img[:, :, 3] == MOVIE_KEY[3])
+        px = img.view(np.uint32)[:, :, 0]          # one comparison per pixel, not four
+        key = px == int.from_bytes(bytes(KEY), 'little')
+        hole = px == int.from_bytes(bytes(MOVIE_KEY), 'little')
         unblend(img, key, 1, 0)           # magenta: green is 0 in the key
         unblend(img, hole, 0, 1)          # cyan: red is 0 in the key
         img[key] = 0

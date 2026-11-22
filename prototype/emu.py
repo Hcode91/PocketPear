@@ -536,6 +536,8 @@ class Emulator:
         t0 = time.time()
         last_beat = t0
         executed = 0
+        import collections
+        guest_samples = collections.Counter() if os.environ.get('PP_GUEST_SAMPLE') else None
         self.quit = False
         while self.kernel.exited is None and not self.quit:
             self.displaylinks.deliver()
@@ -584,10 +586,22 @@ class Emulator:
                 break
             t.ctx = self.uc.context_save()
             t.pc = self.uc.reg_read(UC_ARM_REG_PC)
+            if guest_samples is not None:
+                guest_samples[(t.tid, t.pc)] += 1
             if time.time() - last_beat > float(os.environ.get('PP_HEARTBEAT', 15)):
                 last_beat = time.time()
                 pass
                 g = getattr(self, 'gles', None)
+                if guest_samples:
+                    # PP_GUEST_SAMPLE: where guest time went (the pc at the end of each slice)
+                    by = collections.Counter()
+                    for (tid, pc), c in guest_samples.items():
+                        by[(tid, self.syms.name(pc).split('+')[0])] += c
+                    n = sum(by.values())
+                    print(f'[emu] guest time by thread and function ({n} slices):')
+                    for (tid, fn), c in by.most_common(15):
+                        print(f'    {c * 100 / n:5.1f}%  thread {tid}  {fn}')
+                    guest_samples.clear()
                 print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls'
                       + (f', {g.frame} frames presented, {g.draws} draws since the last' if g is not None else ''))
                 # A game that has gone quiet (its clock runs on, but it makes few calls) is
@@ -634,4 +648,7 @@ def start(rootfs, app):
 
 if __name__ == '__main__':
     emu = start(sys.argv[1], sys.argv[2])
+    if os.environ.get('PP_SAMPLE'):
+        import sampler
+        sampler.start(float(os.environ['PP_SAMPLE']))
     emu.run(int(sys.argv[3]) if len(sys.argv) > 3 else 0)

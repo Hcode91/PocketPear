@@ -26,6 +26,9 @@ class Stubs:
     def replace(self, addr, func, thumb):
         n = len(self.funcs)
         self.funcs.append(func)
+        k = getattr(self.emu, 'kernel', None)
+        if k is not None:
+            k.svc_targets.clear()
         if thumb:
             self.emu.write(addr, struct.pack('<HHI', 0xDF00 | INDEXED_THUMB, 0x4770, n))
         else:

@@ -20,6 +20,10 @@
 #include <memory>
 #include <optional>
 #include <unordered_set>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
 #include "dynarmic/interface/A32/a32.h"
@@ -110,6 +114,15 @@ struct CPU final : Dynarmic::A32::UserCallbacks {
         cfg.global_monitor = monitor.get();
         cfg.processor_id = 0;
         cfg.coprocessors[15] = std::make_shared<CP15>(this);
+        // Speed over bit-exactness where games do not notice: NEON float ops need not reproduce
+        // ARM's "standard FPSCR" (flush-to-zero, default NaN) or exact NaN payloads. (The global
+        // monitor stays: a guest thread can be switched out between ldrex and strex.)
+        // PPCPU_SAFE=1 in the environment turns this off.
+        if (!getenv("PPCPU_SAFE")) {
+            cfg.unsafe_optimizations = true;
+            cfg.optimizations |= Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN
+                               | Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue;
+        }
         jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
     }
 
@@ -368,6 +381,101 @@ EXPORT int ppcpu_unmap(void* c, u32 addr, u32 size) { return static_cast<CPU*>(c
 EXPORT int ppcpu_read(void* c, u32 addr, void* out, u32 n) { return static_cast<CPU*>(c)->read(addr, static_cast<u8*>(out), n); }
 EXPORT int ppcpu_write(void* c, u32 addr, const void* in, u32 n) { return static_cast<CPU*>(c)->write(addr, static_cast<const u8*>(in), n); }
 EXPORT void* ppcpu_host(void* c, u32 addr) { return static_cast<CPU*>(c)->host(addr); }
+
+// r0-r15 in place, for callers that read and write them often (one call instead of one per
+// register). Valid for the life of the CPU. A PC written here does not switch ARM/Thumb.
+EXPORT u32* ppcpu_regs(void* c) { return static_cast<CPU*>(c)->jit->Regs().data(); }
+
+// PVRTC1 (2 or 4 bpp) to RGBA8, the same decoding as prototype/pvrtc.py (which stays as the
+// fallback): block colours interpolated bilinearly, blended by each pixel's modulation value.
+// out holds width * height * 4 bytes.
+EXPORT void ppcpu_pvrtc(const u8* data, u32 len, int width, int height, int bpp, u8* out) {
+    const int bw = bpp == 4 ? 4 : 8;
+    const int nbx = std::max(width / bw, 2), nby = std::max(height / 4, 2);
+    const int count = nbx * nby;
+    std::vector<u64> words(count);
+    std::vector<std::array<float, 4>> ca(count), cb(count);
+    const int m = std::min(nbx, nby);
+    for (int by = 0; by < nby; by++) {
+        for (int bx = 0; bx < nbx; bx++) {
+            long long idx = 0;
+            int shift = 0;
+            for (int bit = 1; bit < m; bit <<= 1) {
+                idx |= (long long)((by & bit) != 0) << shift;
+                idx |= (long long)((bx & bit) != 0) << (shift + 1);
+                shift += 2;
+            }
+            if (nbx > nby) idx |= (long long)(bx >> (shift / 2)) << shift;
+            else if (nby > nbx) idx |= (long long)(by >> (shift / 2)) << shift;
+            if (idx > count - 1) idx = count - 1;
+            if (idx < 0) idx = 0;
+            u64 w = 0;
+            for (int k = 0; k < 8; k++) {
+                u32 o = (u32)idx * 8 + k;
+                if (o < len) w |= (u64)data[o] << (8 * k);
+            }
+            const int i = by * nbx + bx;
+            words[i] = w;
+            for (int which = 0; which < 2; which++) {
+                const u32 c = which == 0 ? (u32)(w >> 32) & 0xffff : (u32)(w >> 48) & 0xffff;
+                const bool opaque = (c >> 15) & 1;
+                u32 r, g, b, a;
+                if (opaque) {
+                    r = (c >> 10) & 0x1f; g = (c >> 5) & 0x1f;
+                    b = which ? (c & 0x1f) : (((c >> 1) & 0xf) << 1 | ((c >> 4) & 1));
+                    a = 255;
+                } else {
+                    r = ((c >> 8) & 0xf) << 1 | ((c >> 11) & 1);
+                    g = ((c >> 4) & 0xf) << 1 | ((c >> 7) & 1);
+                    b = which ? ((c & 0xf) << 1 | ((c >> 3) & 1)) : (((c >> 1) & 0x7) << 2 | ((c >> 2) & 3));
+                    a = (((c >> 12) & 7) * 255) / 7;
+                }
+                auto to8 = [](u32 v) { return (float)((v << 3) | (v >> 2)); };
+                auto& dst = which == 0 ? ca[i] : cb[i];
+                dst = {to8(r), to8(g), to8(b), (float)a};
+            }
+        }
+    }
+    auto wrap = [](int v, int n) { v %= n; return v < 0 ? v + n : v; };
+    for (int y = 0; y < height; y++) {
+        const float v = (y - 2) / 4.0f;
+        const int y0f = (int)std::floor(v);
+        const float fy = v - y0f;
+        const int y0 = wrap(y0f, nby), y1 = wrap(y0f + 1, nby);
+        for (int x = 0; x < width; x++) {
+            const float u = (x - bw / 2.0f) / bw;
+            const int x0f = (int)std::floor(u);
+            const float fx = u - x0f;
+            const int x0 = wrap(x0f, nbx), x1 = wrap(x0f + 1, nbx);
+            const int bi = (y / 4) * nbx + (x / bw);
+            const u64 w = words[bi];
+            const u32 lo = (u32)w;
+            const u32 mode = (u32)(w >> 32) & 1;
+            const int px = x % bw, py = y % 4;
+            float weight;
+            bool punch = false;
+            if (bpp == 4) {
+                const u32 mm = (lo >> (2 * (py * 4 + px))) & 3;
+                static const float w0[4] = {0.0f, 3 / 8.0f, 5 / 8.0f, 1.0f}, w1[4] = {0.0f, 0.5f, 0.5f, 1.0f};
+                weight = mode == 0 ? w0[mm] : w1[mm];
+                punch = mode == 1 && mm == 2;
+            } else {
+                weight = (float)((lo >> (py * 8 + px)) & 1);
+            }
+            u8* o = out + ((size_t)y * width + x) * 4;
+            for (int ch = 0; ch < 4; ch++) {
+                auto up = [&](const std::vector<std::array<float, 4>>& col) {
+                    return (col[y0 * nbx + x0][ch] * (1 - fx) + col[y0 * nbx + x1][ch] * fx) * (1 - fy)
+                         + (col[y1 * nbx + x0][ch] * (1 - fx) + col[y1 * nbx + x1][ch] * fx) * fy;
+                };
+                float val = up(ca) * (1 - weight) + up(cb) * weight;
+                if (ch == 3 && punch) val = 0;
+                val = val < 0 ? 0 : (val > 255 ? 255 : val);
+                o[ch] = (u8)val;
+            }
+        }
+    }
+}
 
 // Regions: fills up to max (start, size, host) triples; returns how many there are.
 EXPORT int ppcpu_regions(void* c, u32* starts, u32* sizes, void** hosts, int max) {

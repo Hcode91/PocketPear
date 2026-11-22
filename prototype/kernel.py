@@ -82,6 +82,7 @@ MACH_NAMES = {3: 'mach_absolute_time', 10: 'mach_vm_allocate', 12: 'mach_vm_deal
 
 class Kernel:
     def __init__(self, emu):
+        self.svc_targets = {}      # svc address (| 1 in Thumb) -> Python function, or None
         self.emu = emu
         self.uc = emu.uc
         self.fds = {0: None, 1: None, 2: None}
@@ -135,44 +136,49 @@ class Kernel:
             if value_hi is not None:
                 self.uc.reg_write(UC_ARM_REG_R1, value_hi & 0xffffffff)
 
+    def svc_target(self, pc, thumb):
+        """The Python function behind the svc that ends just before pc, or None for a system call."""
+        from hle import THUMB_BASE, INDEXED_THUMB, SVC_BASE, INDEXED_ARM
+        if thumb:
+            imm = struct.unpack('<H', self.emu.read(pc - 2, 2))[0] & 0xff
+            if imm == 0x80:
+                return None
+            if imm == INDEXED_THUMB:
+                n = struct.unpack('<I', self.emu.read(pc + 2, 4))[0]
+                return self.emu.stubs.funcs[n]
+            return getattr(self.emu.hle, __import__('hle').FUNCS[imm - THUMB_BASE].split('$')[0])
+        imm = struct.unpack('<I', self.emu.read(pc - 4, 4))[0] & 0xffffff
+        if imm == 0x80:
+            return None
+        if imm == INDEXED_ARM:
+            n = struct.unpack('<I', self.emu.read(pc + 4, 4))[0]
+            return self.emu.stubs.funcs[n]
+        return getattr(self.emu.hle, __import__('hle').FUNCS[imm - SVC_BASE].split('$')[0])
+
     def on_interrupt(self, uc, intno, data):
         if intno != 2:
             print(f'[kernel] interrupt {intno} at pc={uc.reg_read(UC_ARM_REG_PC):#x}')
             uc.emu_stop()
             return
         pc = uc.reg_read(UC_ARM_REG_PC)
-        if uc.reg_read(UC_ARM_REG_CPSR) & 0x20:
-            imm = struct.unpack('<H', self.emu.read(pc - 2, 2))[0] & 0xff
-            if imm != 0x80:
-                from hle import THUMB_BASE, INDEXED_THUMB
-                try:
-                    if imm == INDEXED_THUMB:
-                        self.emu.stubs.call(pc, True)
-                    else:
-                        self.emu.hle.call(imm - THUMB_BASE)
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    self.emu.backtrace(12)
-                    self.exited = -1
-                    uc.emu_stop()
-                return
-        else:
-            imm = struct.unpack('<I', self.emu.read(pc - 4, 4))[0] & 0xffffff
-            if imm != 0x80:
-                from hle import SVC_BASE, INDEXED_ARM
-                try:
-                    if imm == INDEXED_ARM:
-                        self.emu.stubs.call(pc, False)
-                    else:
-                        self.emu.hle.call(imm - SVC_BASE)
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    self.emu.backtrace(12)
-                    self.exited = -1
-                    uc.emu_stop()
-                return
+        thumb = uc.reg_read(UC_ARM_REG_CPSR) & 0x20
+        # What the svc at this address does, worked out once: a replaced guest function (by
+        # index, or one of the HLE pthread functions) or a real system call (None).
+        key = pc | (1 if thumb else 0)
+        target = self.svc_targets.get(key, False)
+        if target is False:
+            target = self.svc_target(pc, thumb)
+            self.svc_targets[key] = target
+        if target is not None:
+            try:
+                target()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                self.emu.backtrace(12)
+                self.exited = -1
+                uc.emu_stop()
+            return
         num = uc.reg_read(UC_ARM_REG_R12)
         if num == 0x80000000:
             self.platform_call()

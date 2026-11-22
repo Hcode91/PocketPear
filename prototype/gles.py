@@ -543,8 +543,7 @@ class GLES:
         target, level, ifmt, w, h, border, size, data = self.args(8)
         blob = self.read(data, size)
         if 0x8C00 <= ifmt <= 0x8C03:                   # PVRTC: decoded on the CPU
-            from pvrtc import decode
-            rgba = decode(blob, w, h, 2 if ifmt in (0x8C01, 0x8C03) else 4)
+            rgba = decode_pvrtc(self.emu, blob, w, h, 2 if ifmt in (0x8C01, 0x8C03) else 4)
             _gl.glTexImage2D(target, level, 0x1908, w, h, 0, 0x1908, 0x1401, rgba)
             return
         _gl.glCompressedTexImage2D(target, level, ifmt, w, h, border, size, blob)
@@ -969,3 +968,15 @@ def _vector_methods():
 
 
 _vector_methods()
+
+
+def decode_pvrtc(emu, blob, w, h, bpp):
+    """PVRTC to RGBA: in the CPU library when it has the decoder, else in numpy."""
+    L = getattr(getattr(emu.uc, 'L', None), 'ppcpu_pvrtc', None) if hasattr(emu, 'uc') else None
+    if L is not None and w > 0 and h > 0:
+        out = ctypes.create_string_buffer(w * h * 4)
+        data = bytes(blob)
+        L(data, len(data), w, h, bpp, out)
+        return out.raw
+    from pvrtc import decode
+    return decode(blob, w, h, bpp)
