@@ -558,12 +558,18 @@ class Emulator:
                                   timeout=0 if slice_insns else int(float(os.environ.get('PP_WATCHDOG', 20)) * 1e6))
                 if not slice_insns and t.ready is None and not t.dead and self.kernel.exited is None \
                         and time.time() - started >= float(os.environ.get('PP_WATCHDOG', 20)) * 0.95:
-                    print(f'[emu] thread {t.tid} ({t.name}) ran {time.time() - started:.0f}s without a system call that waits:')
-                    self.describe_pc()
-                    self.backtrace()
-                    for th in self.sched.threads:
-                        print('     ', th)
-                    break
+                    # Usually a long computation (Bioshock loading a level), not a hang: say where
+                    # it is, give the other threads a turn and carry on. PP_WATCHDOG_STOP=1 stops.
+                    self.long_runs = getattr(self, 'long_runs', 0) + 1
+                    if self.long_runs <= 3 or os.environ.get('PP_WATCHDOG_STOP'):
+                        print(f'[emu] thread {t.tid} ({t.name}) ran {time.time() - started:.0f}s without a system call that waits'
+                              + (':' if os.environ.get('PP_WATCHDOG_STOP') else '; carrying on. It was at:'))
+                        self.describe_pc()
+                        self.backtrace(12)
+                    if os.environ.get('PP_WATCHDOG_STOP'):
+                        for th in self.sched.threads:
+                            print('     ', th)
+                        break
             except UcError as e:
                 regs = {n: self.uc.reg_read(r) for n, r in [('pc', UC_ARM_REG_PC), ('lr', UC_ARM_REG_LR), ('sp', UC_ARM_REG_SP),
                         ('r0', UC_ARM_REG_R0), ('r1', UC_ARM_REG_R1), ('r2', UC_ARM_REG_R2), ('r3', UC_ARM_REG_R3), ('r12', UC_ARM_REG_R12)]}

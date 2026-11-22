@@ -133,8 +133,14 @@ class MissingImports:
               + (' ...' if len(names) > 12 else ''))
         self.stub = self.alloc(16)
         self.emu.stubs.replace(self.stub, self.stand_in, False)
+        self.own = {}                  # imports done here rather than answered with 0
+        for name, fn in OWN.items():
+            if name in names:
+                a = self.alloc(16)
+                self.emu.stubs.replace(a, lambda fn=fn: fn(self.emu), False)
+                self.own[name] = a
         for sym, _, addr in lazies:
-            self.emu.w32(addr, self.stub)
+            self.emu.w32(addr, self.own.get(sym, self.stub))
         le_va, le_fo = linkedit
         for pos in {b[1] for b in binds}:
             a = le_va + pos - le_fo
@@ -182,7 +188,7 @@ class MissingImports:
             if sym.startswith(('_OBJC_CLASS_$_', '_OBJC_METACLASS_$_', '_OBJC_IVAR_$_')):
                 continue
             if sym not in made:
-                made[sym] = self.constant(sym) if is_constant(sym) else self.stub
+                made[sym] = self.own.get(sym) or (self.constant(sym) if is_constant(sym) else self.stub)
             self.emu.w32(addr, made[sym])
         print(f'[imports] filled {len(self.slots)} launch-time slot(s) before the game\'s own code')
 
@@ -194,3 +200,27 @@ class MissingImports:
             print(f'[imports] a function iOS 6 does not have was called from {self.emu.syms.name(lr)}; returned 0')
         self.emu.uc.reg_write(UC_ARM_REG_R0, 0)
         self.emu.uc.reg_write(UC_ARM_REG_R1, 0)
+
+
+def _sincos_stret(emu):
+    """struct {double sin, cos} __sincos_stret(double): iOS 7's, which compilers emit for a
+    sin and cos of the same value. The struct is returned through r0; the double is in r1:r2."""
+    import math
+    from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2
+    uc = emu.uc
+    out = uc.reg_read(UC_ARM_REG_R0)
+    x = struct.unpack('<d', struct.pack('<II', uc.reg_read(UC_ARM_REG_R1), uc.reg_read(UC_ARM_REG_R2)))[0]
+    emu.write(out, struct.pack('<dd', math.sin(x), math.cos(x)))
+
+
+def _sincosf_stret(emu):
+    """struct {float sin, cos} __sincosf_stret(float): returned through r0, the float in r1."""
+    import math
+    from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1
+    uc = emu.uc
+    out = uc.reg_read(UC_ARM_REG_R0)
+    x = struct.unpack('<f', struct.pack('<I', uc.reg_read(UC_ARM_REG_R1)))[0]
+    emu.write(out, struct.pack('<ff', math.sin(x), math.cos(x)))
+
+
+OWN = {'___sincos_stret': _sincos_stret, '___sincosf_stret': _sincosf_stret}
