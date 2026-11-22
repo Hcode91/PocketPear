@@ -11,6 +11,10 @@ from unicorn.arm_const import *
 
 BUFFER_HEADER = 28     # AudioQueueBuffer: capacity, data, byte size, user data, pd capacity, pds, pd count
 
+SYSTEM_SOUND_FUNCS = ['AudioServicesCreateSystemSoundID', 'AudioServicesDisposeSystemSoundID',
+                      'AudioServicesPlaySystemSound', 'AudioServicesPlayAlertSound',
+                      'AudioServicesAddSystemSoundCompletion', 'AudioServicesRemoveSystemSoundCompletion']
+
 FUNCS = ['AudioQueueNewOutput', 'AudioQueueAllocateBuffer', 'AudioQueueAllocateBufferWithPacketDescriptions',
          'AudioQueueFreeBuffer', 'AudioQueueEnqueueBuffer', 'AudioQueueEnqueueBufferWithParameters',
          'AudioQueueStart', 'AudioQueuePrime', 'AudioQueueStop', 'AudioQueuePause', 'AudioQueueFlush',
@@ -47,6 +51,40 @@ class AudioQueues:
                 made += 1
         if made:
             print(f'[audio] {made} AudioQueue functions replaced (no sound output yet)')
+        # System sounds go through mediaserverd, which is not here: creating one sleeps and
+        # retries the connection for seconds (Bioshock creates a dozen before its menu shows).
+        # They are accepted and stay silent.
+        self.next_sound = 0x1000
+        sys_made = 0
+        for f in SYSTEM_SOUND_FUNCS:
+            a = names.get('_' + f + ' (AudioToolbox)')
+            if a is not None:
+                stubs.replace(a, getattr(self, f), a in self.emu.syms.thumb)
+                sys_made += 1
+        if sys_made:
+            print(f'[audio] {sys_made} system sound functions replaced (silent)')
+
+    def AudioServicesCreateSystemSoundID(self):
+        _url, out = self.arg(0), self.arg(1)
+        self.next_sound += 1
+        if out:
+            self.emu.w32(out, self.next_sound)
+        self.ret(0)
+
+    def AudioServicesDisposeSystemSoundID(self):
+        self.ret(0)
+
+    def AudioServicesPlaySystemSound(self):
+        self.ret(0)
+
+    def AudioServicesPlayAlertSound(self):
+        self.ret(0)
+
+    def AudioServicesAddSystemSoundCompletion(self):
+        self.ret(0)
+
+    def AudioServicesRemoveSystemSoundCompletion(self):
+        self.ret(0)
 
     # ------------------------------------------------------------------ plumbing
     def arg(self, n):

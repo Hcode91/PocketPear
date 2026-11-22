@@ -14,6 +14,12 @@ if [ ! -d "$SRC/.git" ]; then
     git -C "$SRC" checkout -q "$DYNARMIC_COMMIT"
     git -C "$SRC" submodule update -q --init --recursive --depth 1
 fi
+# Our changes to dynarmic (instructions it does not implement yet), applied to a clean tree each
+# time: a cached checkout may already carry an earlier set.
+git -C "$SRC" checkout -q -- .
+for p in "$HERE"/dynarmic-patches/*.patch; do
+    [ -e "$p" ] && git -C "$SRC" apply "$p"
+done
 # Boost is header-only here. Its headers get a folder of their own: /usr/include itself must not
 # reach the compiler, or the host's C library headers would shadow the NDK's.
 mkdir -p build-ppcpu/boost
