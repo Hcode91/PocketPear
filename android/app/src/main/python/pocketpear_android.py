@@ -270,9 +270,14 @@ class _Log:
         self.f.flush()
 
 
-def run(files_dir, app_path, listener):
-    """Run a game until it exits or stop() is called. Blocks; call it on its own thread."""
+def run(files_dir, app_path, listener, realtime=False):
+    """Run a game until it exits or stop() is called. Blocks; call it on its own thread.
+    realtime: the game's clock follows the real one, so a game too heavy for the phone plays
+    at its proper speed with fewer frames, rather than in slow motion (the paced default)."""
     global _emu, _log
+    import sched
+    os.environ['PP_CLOCK'] = 'real' if realtime else 'paced'
+    sched.CLOCK.__init__()
     log = _Log(os.path.join(files_dir, 'run.log'), listener)
     _log = log
     old = sys.stdout, sys.stderr

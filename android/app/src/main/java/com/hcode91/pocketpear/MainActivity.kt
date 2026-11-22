@@ -84,6 +84,9 @@ class MainActivity : Activity() {
         refresh()
     }
 
+    private fun prefs() = getSharedPreferences("games", MODE_PRIVATE)
+    private fun realtime(path: String) = prefs().getBoolean("realtime:$path", false)
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
@@ -137,13 +140,22 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     if (!ready) { toast("Import the firmware first."); return@setOnClickListener }
                     startActivity(Intent(this@MainActivity, GameActivity::class.java)
-                        .putExtra("app", path).putExtra("name", name))
+                        .putExtra("app", path).putExtra("name", name)
+                        .putExtra("realtime", realtime(path)))
                 }
                 setOnLongClickListener {
                     val where = py.callAttr("data_path", path).toString()
+                    val clock = if (realtime(path)) "Game speed: real time (tap for slow motion)"
+                                else "Game speed: slow motion when behind (tap for real time)"
                     AlertDialog.Builder(this@MainActivity).setTitle(name)
-                        .setItems(arrayOf("Clear game data", "Remove game")) { _, which ->
-                            if (which == 0) AlertDialog.Builder(this@MainActivity)
+                        .setItems(arrayOf("Clear game data", "Remove game", clock)) { _, which ->
+                            if (which == 2) {
+                                val on = !realtime(path)
+                                prefs().edit().putBoolean("realtime:$path", on).apply()
+                                toast(if (on) "$name keeps real time: proper speed, fewer frames when the phone can't keep up."
+                                      else "$name slows down when the phone can't keep up: smoother, but in slow motion.")
+                            }
+                            else if (which == 0) AlertDialog.Builder(this@MainActivity)
                                 .setTitle("Clear $name's data?")
                                 .setMessage("Deletes its saves and settings, as reinstalling it did on an iPhone. The game stays installed.\n\n$where")
                                 .setPositiveButton("Clear") { _, _ -> py.callAttr("clear_data", path); toast("$name's data cleared.") }

@@ -83,7 +83,8 @@ class GameActivity : Activity() {
         say("Starting ${intent.getStringExtra("name")}... (the first frame takes a few minutes)")
 
         val app = intent.getStringExtra("app")!!
-        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener()) }, "pocketpear-emu").apply {
+        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener(),
+                intent.getBooleanExtra("realtime", false)) }, "pocketpear-emu").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }
