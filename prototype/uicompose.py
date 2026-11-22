@@ -198,6 +198,8 @@ class Compositor:
         else:
             self.hole = None
         self.overlay = img if img[:, :, 3].any() or self.hole is not None else None
+        self.version = getattr(self, 'version', 0) + 1
+        self.cache = None
         self.count += 1
         if self.count in (1, 2, 10) or self.count % 300 == 0 or (self.hole is not None) != getattr(self, 'had_hole', False):
             self.had_hole = self.hole is not None
@@ -237,15 +239,25 @@ class Compositor:
 
     def over(self, rgba, fw, fh):
         """Composite the overlay over a frame given bottom row first (GL order)."""
-        top = self.oriented(fw, fh)
-        if top is None:
+        if self.overlay is None:
             return rgba
+        c = getattr(self, 'cache', None)
+        if c is None or c[0] != (fw, fh):
+            # turned, flipped to GL row order and split, once per composition rather than per frame
+            top = self.oriented(fw, fh)[::-1]
+            inv = (255 - top[:, :, 3:4]).astype(np.uint16)
+            hole = self.oriented(fw, fh, self.hole)[::-1] if self.hole is not None else None
+            covered = bool(top[:, :, 3].any())
+            c = self.cache = ((fw, fh), top.astype(np.uint16), inv, hole, covered)
+        _, top, inv, hole, covered = c
         frame = np.frombuffer(rgba, np.uint8).reshape(fh, fw, 4)
-        top = top[::-1].astype(np.uint16)
-        a = top[:, :, 3:4]
-        out = top + (frame.astype(np.uint16) * (255 - a) + 127) // 255
-        out[:, :, 3] = 255
-        if self.hole is not None:
-            hole = self.oriented(fw, fh, self.hole)[::-1]
+        if covered:
+            out = top + ((frame.astype(np.uint16) * inv + 255) >> 8)
+            out[:, :, 3] = 255
+            out = np.minimum(out, 255).astype(np.uint8)
+        else:
+            out = frame.copy()
+            out[:, :, 3] = 255
+        if hole is not None:
             out[hole] = 0
-        return np.minimum(out, 255).astype(np.uint8).tobytes()
+        return out.tobytes()

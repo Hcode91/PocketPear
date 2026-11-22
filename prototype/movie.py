@@ -336,9 +336,14 @@ class Movies:
         self.ret(1 if p and p.repeat else 0)
 
     def m_set_repeat(self):
+        # Bioshock starts its intro movie and only then sets "no repeat"; a host player already
+        # looping has to be told, or the movie plays for ever and the game waits on its end.
         p = self.player()
         if p:
-            p.repeat = self.arg(2) == 1
+            repeat = self.arg(2) == 1
+            if repeat != p.repeat and p.state != STOPPED and self.sink is not None:
+                self.sink('repeat', p.id, p.path, repeat)
+            p.repeat = repeat
         self.ret(0)
 
     def m_fullscreen(self):

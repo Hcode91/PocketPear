@@ -368,9 +368,13 @@ class GLES:
         self.last_present = time.time()
         every = int(os.environ.get('PP_FRAME_EVERY', 30))
         save = self.out_dir and (self.frame == 1 or self.frame % every == 0)
+        ui = getattr(self.emu, 'ui', None)
+        if self.frame_sink is not None and not save and self.same_as_last(ui):
+            self.draws = self.client_draws = 0
+            self.ret(1)
+            return
         if self.frame_sink is not None or save:
             rgba = self.read_frame()
-            ui = getattr(self.emu, 'ui', None)
             if ui is not None and ui.overlay is not None:
                 rgba = ui.over(rgba, *self.screen)
             if self.frame_sink is not None:
@@ -379,6 +383,24 @@ class GLES:
                 self.save_frame(rgba)
         self.draws = self.client_draws = 0
         self.ret(1)
+
+    def same_as_last(self, ui):
+        """Whether this frame would show exactly what the last one did, so it need not be read
+        back, composited and sent again. A frame with no draw calls is one colour (whatever it
+        was cleared to), so one pixel tells; with the UIKit views unchanged it is the same
+        picture. Bioshock presents sixty such frames a second behind its menu and movies, and
+        each cost a full-screen readback and composite on the phone."""
+        if self.draws or self.client_draws:
+            self.last_empty = None
+            return False
+        px = (ctypes.c_ubyte * 4)()
+        _gl.glReadPixels(0, 0, 1, 1, 0x1908, 0x1401, px)
+        key = (bytes(px), getattr(ui, 'version', 0), self.screen)
+        if key == getattr(self, 'last_empty', None):
+            self.skipped = getattr(self, 'skipped', 0) + 1
+            return True
+        self.last_empty = key
+        return False
 
     def present_ui_only(self):
         """Show the UIKit views alone, for an app that presents no GL frames (or none lately)."""

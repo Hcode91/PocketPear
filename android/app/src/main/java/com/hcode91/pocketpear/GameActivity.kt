@@ -161,7 +161,7 @@ class GameActivity : Activity() {
                         touches.execute { py.callAttr("movie_info", id, secs, w, h) }
                     }
                     mp.setOnCompletionListener {
-                        if (player === mp && !repeat) {
+                        if (player === mp && !mp.isLooping) {
                             movieView.visibility = View.INVISIBLE
                             touches.execute { py.callAttr("movie_done", id, false) }
                         }
@@ -187,6 +187,7 @@ class GameActivity : Activity() {
             "pause" -> if (id == playerId) player?.pause()
             "resume" -> if (id == playerId) player?.start()
             "restart" -> if (id == playerId) player?.seekTo(0)
+            "repeat" -> if (id == playerId) player?.isLooping = repeat
             "stop" -> if (id == playerId) releasePlayer()
         }
     }
