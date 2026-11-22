@@ -308,6 +308,7 @@ def run(files_dir, app_path, listener, realtime=False):
                 else:
                     rect = (0, 0, 0, 0, w, h)
                 if rect != movie_rect[0]:
+                    print(f'[movie] the frame leaves {"a hole at " + str(rect[:4]) if rect[2] else "no hole (the movie goes on top)"}')
                     movie_rect[0] = rect
                     listener.onMovieRect(*rect)
             listener.onFrame(np.ascontiguousarray(img).tobytes(), w, h)
@@ -344,6 +345,11 @@ def touches(ids, xs, ys, lifted):
     e = _emu
     if e is not None:
         e.kernel.touches.inject_all(list(ids), list(xs), list(ys), int(lifted))
+
+
+def note(line):
+    """A line from the app's side (the movie player) for the run log."""
+    print(line)
 
 
 def movie_done(pid, error):

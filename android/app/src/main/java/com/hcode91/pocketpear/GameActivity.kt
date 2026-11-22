@@ -157,6 +157,7 @@ class GameActivity : Activity() {
                     mp.setOnPreparedListener {
                         if (player !== mp) return@setOnPreparedListener
                         it.start()
+                        note("[movie] host player $id prepared: ${it.videoWidth}x${it.videoHeight}, ${it.duration / 1000.0} s")
                         val secs = it.duration / 1000.0
                         val w = it.videoWidth
                         val h = it.videoHeight
@@ -180,6 +181,7 @@ class GameActivity : Activity() {
                     // last movie's final frame on screen while the next one played unseen
                     // (Bioshock's menu backdrop stayed up through its whole opening movie).
                     freshMovieView()
+                    firstPicture = false
                     movieView.visibility = View.VISIBLE
                     placeMovie()
                     attachSurface(mp)
@@ -202,6 +204,7 @@ class GameActivity : Activity() {
     private fun attachSurface(mp: MediaPlayer) {
         fun begin(t: SurfaceTexture) {
             if (player !== mp) return
+            note("[movie] host player $id has its surface (${movieView.width}x${movieView.height})")
             val surface = Surface(t)
             movieSurface = surface
             mp.setSurface(surface)
@@ -213,9 +216,16 @@ class GameActivity : Activity() {
             override fun onSurfaceTextureAvailable(t: SurfaceTexture, w: Int, h: Int) = begin(t)
             override fun onSurfaceTextureSizeChanged(t: SurfaceTexture, w: Int, h: Int) {}
             override fun onSurfaceTextureDestroyed(t: SurfaceTexture) = true
-            override fun onSurfaceTextureUpdated(t: SurfaceTexture) {}
+            override fun onSurfaceTextureUpdated(t: SurfaceTexture) {
+                if (!firstPicture) { firstPicture = true; note("[movie] host player $playerId shows its first picture") }
+            }
         }
     }
+
+    private var firstPicture = false
+    private var lastPlace = ""
+
+    private fun note(line: String) { touches.execute { py.callAttr("note", line) } }
 
     /** Replaces the movie view with a new, empty one in the same place in the layout. */
     private fun freshMovieView() {
@@ -261,6 +271,8 @@ class GameActivity : Activity() {
         movieView.layoutParams = lp
         // under the frame when it has a hole for it, over it when the player is fullscreen
         movieView.translationZ = if (full) 1f else 0f
+        val where = "[movie] host view at ${x.toInt()},${y.toInt()} ${w.toInt()}x${h.toInt()} ${if (full) "over" else "under"} the frame, ${if (movieView.visibility == View.VISIBLE) "visible" else "hidden"}"
+        if (where != lastPlace) { lastPlace = where; note(where) }
     }
 
     /** Every finger on the screen, in the game's frame pixels (view coordinates through
