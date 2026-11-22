@@ -284,6 +284,7 @@ def run(files_dir, app_path, listener):
         e = emu_mod.start(rootfs, app_path)
         _emu = e
         frames = [0]
+        movie_rect = [None]
 
         def sink(rgba, w, h):
             frames[0] += 1
@@ -292,7 +293,25 @@ def run(files_dir, app_path, listener):
             if turn:                       # a landscape game drawn into a portrait renderbuffer
                 img = np.rot90(img, -1 if turn == 'cw' else 1)
                 w, h = h, w
+            if e.movies.playing():
+                # the movie view is left transparent in the frame; the video goes under it there,
+                # or over everything when its view is not on screen (a fullscreen player)
+                hole = img[:, :, 3] == 0
+                if hole.any():
+                    ys, xs = np.nonzero(hole)
+                    rect = (int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1), w, h)
+                else:
+                    rect = (0, 0, 0, 0, w, h)
+                if rect != movie_rect[0]:
+                    movie_rect[0] = rect
+                    listener.onMovieRect(*rect)
             listener.onFrame(np.ascontiguousarray(img).tobytes(), w, h)
+
+        def movie_event(event, pid, path, repeat):
+            listener.onMovie(event, pid, path or '', bool(repeat))
+            if event in ('play', 'restart'):
+                movie_rect[0] = None
+        e.movies.sink = movie_event
 
         e.gles.frame_sink = sink
         e.run(0)
@@ -320,6 +339,19 @@ def touches(ids, xs, ys, lifted):
     e = _emu
     if e is not None:
         e.kernel.touches.inject_all(list(ids), list(xs), list(ys), int(lifted))
+
+
+def movie_done(pid, error):
+    """The host player reached the end of a movie (or could not play it)."""
+    e = _emu
+    if e is not None:
+        e.movies.inbox.append(('done', int(pid), 1 if error else 0))
+
+
+def movie_info(pid, seconds, width, height):
+    e = _emu
+    if e is not None:
+        e.movies.inbox.append(('info', int(pid), float(seconds), (float(width), float(height))))
 
 
 def stop():

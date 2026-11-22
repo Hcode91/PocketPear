@@ -283,6 +283,10 @@ class Emulator:
         self.ui = Compositor(self)
         if not os.environ.get('PP_NO_UI'):
             self.ui.install(self.stubs)
+        from movie import Movies
+        self.movies = Movies(self)
+        if not os.environ.get('PP_NO_MOVIE'):
+            self.movies.install(self.stubs)
         from imports import MissingImports
         self.missing_imports = MissingImports(self)
         self.missing_imports.install(exe, system_defined)

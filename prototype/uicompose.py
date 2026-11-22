@@ -22,93 +22,11 @@ import numpy as np
 from unicorn.arm_const import *
 
 from sched import CLOCK
+from guestcall import GuestCalls, fbits
 
 MAX_RATE = float(os.environ.get('PP_UI_RATE', 10))      # compositions a second, at most
 REFRESH = 1.0                                             # recompose this often without commits
 KEY = (255, 0, 255, 255)
-INDEXED_ARM = 0x507f
-
-
-class GuestCalls:
-    """Runs a generator of guest function calls on the main thread while its run loop waits.
-
-    The generator yields (address, [args]) and receives (r0, r1) back. Arguments past the
-    fourth go on the stack; floats are passed as their bit patterns (iOS armv7 is softfp).
-    """
-
-    def __init__(self, emu, stubs):
-        self.emu = emu
-        self.uc = emu.uc
-        self.saved = None
-        self.gen = None
-        self.sp = 0
-        page = emu.find_free(0x1000)
-        emu.map(page, 0x1000)
-        n = stubs.replace(page, self.returned, False)
-        # svc; bx r12; index: a call returns here, and the next one starts from here with
-        # r12 holding its address and lr still pointing back at the stub.
-        emu.write(page, struct.pack('<III', 0xEF000000 | INDEXED_ARM, 0xE12FFF1C, n))
-        self.stub = page
-
-    def busy(self):
-        return self.saved is not None
-
-    def start(self, gen, why):
-        main = self.emu.sched.threads[0]
-        try:
-            call = next(gen)
-        except StopIteration:
-            return
-        self.gen = gen
-        self.saved = (main.ctx, main.ready, main.complete, main.deadline, main.why)
-        self.uc.context_restore(main.ctx)
-        self.sp = (self.uc.reg_read(UC_ARM_REG_SP) - 512) & ~7
-        self.setup(call)
-        addr = call[0]
-        thumb = 1 if addr in self.emu.syms.thumb else 0
-        cpsr = self.uc.reg_read(UC_ARM_REG_CPSR) & ~(1 << 5)
-        self.uc.reg_write(UC_ARM_REG_CPSR, cpsr | (thumb << 5))
-        self.uc.reg_write(UC_ARM_REG_PC, addr | thumb)
-        main.ctx = self.uc.context_save()
-        main.ready = main.complete = main.deadline = None
-        main.why = why
-
-    def setup(self, call):
-        addr, args = call
-        args = [a & 0xffffffff for a in args]
-        self.uc.reg_write(UC_ARM_REG_SP, self.sp)
-        for i, a in enumerate(args[:4]):
-            self.uc.reg_write(UC_ARM_REG_R0 + i, a)
-        if len(args) > 4:
-            self.emu.write(self.sp, struct.pack(f'<{len(args) - 4}I', *args[4:]))
-        self.uc.reg_write(UC_ARM_REG_LR, self.stub)
-        self.uc.reg_write(UC_ARM_REG_R12, addr | (1 if addr in self.emu.syms.thumb else 0))
-
-    def returned(self):
-        r0, r1 = self.uc.reg_read(UC_ARM_REG_R0), self.uc.reg_read(UC_ARM_REG_R1)
-        try:
-            call = self.gen.send((r0, r1))
-        except StopIteration:
-            self.finish()
-            return
-        except Exception as e:
-            print(f'[ui] composition failed: {type(e).__name__}: {e}')
-            self.finish()
-            return
-        self.setup(call)          # bx r12 starts it
-
-    def finish(self):
-        main = self.emu.sched.threads[0]
-        ctx, ready, complete, deadline, why = self.saved
-        self.saved = None
-        self.gen = None
-        self.uc.context_restore(ctx)
-        main.ready, main.complete, main.deadline, main.why = ready, complete, deadline, why
-        self.uc.emu_stop()
-
-
-def fbits(x):
-    return struct.unpack('<I', struct.pack('<f', x))[0]
 
 
 class Compositor:
@@ -117,6 +35,7 @@ class Compositor:
         self.calls = None
         self.dirty = True
         self.last = -1.0
+        self.hole = None           # where a movie view shows: left transparent for the host's video
         self.overlay = None        # RGBA, top row first, screen (portrait) orientation, premultiplied
         self.orientation = 1
         self.count = 0
@@ -160,15 +79,25 @@ class Compositor:
     def next_due(self):
         if self.failed or self.calls is None or self.calls.busy():
             return None
-        if not self.main_waiting() or not getattr(self.emu.kernel, 'render_contexts', None):
+        if not self.main_waiting():
             return None
-        due = self.last + (1 / MAX_RATE if self.dirty else REFRESH)
-        return due
+        movies = getattr(self.emu, 'movies', None)
+        if movies is not None and movies.next_due() is not None:
+            return movies.next_due()
+        if not getattr(self.emu.kernel, 'render_contexts', None):
+            return None
+        # Only a pending change wakes a waiting app; the slow refresh happens while it runs.
+        return self.last + 1 / MAX_RATE if self.dirty else None
 
     def deliver(self):
         if self.failed or self.calls is None or self.calls.busy():
             return
         if self.emu.displaylinks.saved is not None or not self.main_waiting():
+            return
+        movies = getattr(self.emu, 'movies', None)
+        job = movies.pending_job() if movies is not None and movies.calls is not None else None
+        if job is not None:
+            self.calls.start(job, 'posting a movie notification')
             return
         if not getattr(self.emu.kernel, 'render_contexts', None):
             return                        # no UIKit window yet
@@ -261,12 +190,24 @@ class Compositor:
         img = np.frombuffer(self.emu.read(self.buf, self.w * self.h * 4), np.uint8).reshape(self.h, self.w, 4).copy()
         key = (img[:, :, 0] == KEY[0]) & (img[:, :, 1] == KEY[1]) & (img[:, :, 2] == KEY[2]) & (img[:, :, 3] == KEY[3])
         img[key] = 0
-        self.overlay = img if img[:, :, 3].any() else None
+        from movie import MOVIE_KEY
+        hole = (img[:, :, 0] == MOVIE_KEY[0]) & (img[:, :, 1] == MOVIE_KEY[1]) & (img[:, :, 2] == MOVIE_KEY[2]) & (img[:, :, 3] == MOVIE_KEY[3])
+        if hole.any():
+            img[hole] = 0
+            self.hole = hole
+        else:
+            self.hole = None
+        self.overlay = img if img[:, :, 3].any() or self.hole is not None else None
         self.count += 1
-        if self.count in (1, 2, 10) or self.count % 300 == 0:
+        if self.count in (1, 2, 10) or self.count % 300 == 0 or (self.hole is not None) != getattr(self, 'had_hole', False):
+            self.had_hole = self.hole is not None
             cover = 0 if self.overlay is None else float((img[:, :, 3] > 0).mean())
+            movie = ''
+            if self.hole is not None:
+                ys, xs = np.nonzero(self.hole)
+                movie = f', movie view at {xs.min()},{ys.min()} {xs.max() - xs.min() + 1}x{ys.max() - ys.min() + 1}'
             print(f'[ui] composition {self.count}: {drawn} window(s), {cover * 100:.0f}% of the screen covered by views,'
-                  f' orientation {self.orientation}')
+                  f' orientation {self.orientation}{movie}')
         dump = os.environ.get('PP_UI_DUMP')
         if dump and self.overlay is not None and self.count <= 20:
             from PIL import Image
@@ -276,9 +217,10 @@ class Compositor:
             g.present_ui_only()
 
     # ---------------------------------------------------------------- compositing
-    def oriented(self, fw, fh):
-        """The overlay turned and sized to a frame of fw x fh, top row first, or None."""
-        img = self.overlay
+    def oriented(self, fw, fh, img=None):
+        """The overlay (or img) turned and sized to a frame of fw x fh, top row first, or None."""
+        if img is None:
+            img = self.overlay
         if img is None:
             return None
         if fw > fh:                       # the GL frame is in the interface's landscape orientation
@@ -303,4 +245,7 @@ class Compositor:
         a = top[:, :, 3:4]
         out = top + (frame.astype(np.uint16) * (255 - a) + 127) // 255
         out[:, :, 3] = 255
+        if self.hole is not None:
+            hole = self.oriented(fw, fh, self.hole)[::-1]
+            out[hole] = 0
         return np.minimum(out, 255).astype(np.uint8).tobytes()

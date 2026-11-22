@@ -3,6 +3,10 @@ package com.hcode91.pocketpear
 import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -35,6 +39,13 @@ class GameActivity : Activity() {
     private var frames = 0
     private val lines = ArrayDeque<String>()
     @Volatile private var pending: ByteArray? = null
+    private lateinit var root: FrameLayout
+    private lateinit var movieView: TextureView
+    private var player: MediaPlayer? = null
+    private var playerId = 0
+    private var movieRect: IntArray? = null      // x, y, w, h in frame pixels, and the frame's w, h
+    private var videoW = 0
+    private var videoH = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,23 +54,29 @@ class GameActivity : Activity() {
 
         image = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.BLACK)
+            // transparent where the frame is: a movie plays underneath, in the movie view's place
             setOnTouchListener { v, e -> onTouch(v, e); true }
         }
+        movieView = TextureView(this).apply { visibility = View.INVISIBLE }
         log = TextView(this).apply {
             setTextColor(Color.argb(220, 255, 255, 255))
             setShadowLayer(3f, 1f, 1f, Color.BLACK)
             textSize = 11f
             setPadding(12, 8, 12, 8)
         }
-        val root = FrameLayout(this)
+        root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        root.addView(movieView, FrameLayout.LayoutParams(0, 0))
         root.addView(image, FrameLayout.LayoutParams(-1, -1))
+        root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeMovie() }
         root.addView(log, FrameLayout.LayoutParams(-1, -2))
+        log.translationZ = 2f
         root.addView(Button(this).apply {
             text = "Copy log"
             textSize = 11f
             alpha = 0.6f
             setOnClickListener { copyLog(this@GameActivity, py) }
+            translationZ = 2f
         }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
         setContentView(root)
         say("Starting ${intent.getStringExtra("name")}... (the first frame takes a few minutes)")
@@ -90,6 +107,16 @@ class GameActivity : Activity() {
         }
 
         @Suppress("unused")
+        fun onMovie(event: String, id: Int, path: String, repeat: Boolean) {
+            ui.post { movie(event, id, path, repeat) }
+        }
+
+        @Suppress("unused")
+        fun onMovieRect(x: Int, y: Int, w: Int, h: Int, fw: Int, fh: Int) {
+            ui.post { movieRect = intArrayOf(x, y, w, h, fw, fh); placeMovie() }
+        }
+
+        @Suppress("unused")
         fun onLog(line: String) { ui.post { say(line) } }
 
         @Suppress("unused")
@@ -109,6 +136,111 @@ class GameActivity : Activity() {
         image.invalidate()
         frames++
         if (frames == 1) say("First frame. Tap the screen to play; tap this text to hide it.")
+    }
+
+    /** Plays a game's movie with the platform's player, in a view under the game's frame. */
+    private fun movie(event: String, id: Int, path: String, repeat: Boolean) {
+        when (event) {
+            "play" -> {
+                releasePlayer()
+                playerId = id
+                movieRect = null            // full screen until the frame shows where its view is
+                videoW = 0; videoH = 0
+                val mp = MediaPlayer()
+                player = mp
+                try {
+                    mp.setDataSource(path)
+                    mp.isLooping = repeat
+                    mp.setOnVideoSizeChangedListener { _, w, h -> videoW = w; videoH = h; placeMovie() }
+                    mp.setOnPreparedListener {
+                        if (player !== mp) return@setOnPreparedListener
+                        it.start()
+                        val secs = it.duration / 1000.0
+                        val w = it.videoWidth
+                        val h = it.videoHeight
+                        touches.execute { py.callAttr("movie_info", id, secs, w, h) }
+                    }
+                    mp.setOnCompletionListener {
+                        if (player === mp && !repeat) {
+                            movieView.visibility = View.INVISIBLE
+                            touches.execute { py.callAttr("movie_done", id, false) }
+                        }
+                    }
+                    mp.setOnErrorListener { _, what, extra ->
+                        say("Movie could not play ($what/$extra): ${path.substringAfterLast('/')}")
+                        if (player === mp) {
+                            movieView.visibility = View.INVISIBLE
+                            touches.execute { py.callAttr("movie_done", id, true) }
+                        }
+                        true
+                    }
+                    attachSurface(mp)
+                    movieView.visibility = View.VISIBLE
+                    placeMovie()
+                    mp.prepareAsync()
+                } catch (e: Exception) {
+                    say("Movie could not play: ${e.message}")
+                    releasePlayer()
+                    touches.execute { py.callAttr("movie_done", id, true) }
+                }
+            }
+            "pause" -> if (id == playerId) player?.pause()
+            "resume" -> if (id == playerId) player?.start()
+            "restart" -> if (id == playerId) player?.seekTo(0)
+            "stop" -> if (id == playerId) releasePlayer()
+        }
+    }
+
+    private fun attachSurface(mp: MediaPlayer) {
+        val st = movieView.surfaceTexture
+        if (st != null) {
+            mp.setSurface(Surface(st))
+            return
+        }
+        movieView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(t: SurfaceTexture, w: Int, h: Int) {
+                player?.setSurface(Surface(t))
+            }
+            override fun onSurfaceTextureSizeChanged(t: SurfaceTexture, w: Int, h: Int) {}
+            override fun onSurfaceTextureDestroyed(t: SurfaceTexture) = true
+            override fun onSurfaceTextureUpdated(t: SurfaceTexture) {}
+        }
+    }
+
+    private fun releasePlayer() {
+        player?.let { try { it.stop() } catch (_: Exception) {}; it.release() }
+        player = null
+        movieView.visibility = View.INVISIBLE
+    }
+
+    /** Puts the movie in its view's place in the frame (under the frame, which is transparent
+     *  there), or over the whole frame for a fullscreen player, fitted to the video's shape. */
+    private fun placeMovie() {
+        if (player == null) return
+        val vw = root.width.toFloat()
+        val vh = root.height.toFloat()
+        if (vw <= 0f || vh <= 0f) return
+        val r = movieRect
+        val fw = (r?.get(4) ?: frameW).toFloat()
+        val fh = (r?.get(5) ?: frameH).toFloat()
+        val s = minOf(vw / fw, vh / fh)
+        val ox = (vw - fw * s) / 2
+        val oy = (vh - fh * s) / 2
+        val full = r == null || r[2] <= 0 || r[3] <= 0
+        var x = if (full) ox else ox + r!![0] * s
+        var y = if (full) oy else oy + r!![1] * s
+        var w = if (full) fw * s else r!![2] * s
+        var h = if (full) fh * s else r!![3] * s
+        if (videoW > 0 && videoH > 0) {             // aspect fit, as MPMovieScalingModeAspectFit
+            val k = minOf(w / videoW, h / videoH)
+            x += (w - videoW * k) / 2; y += (h - videoH * k) / 2
+            w = videoW * k; h = videoH * k
+        }
+        val lp = FrameLayout.LayoutParams(w.toInt().coerceAtLeast(1), h.toInt().coerceAtLeast(1))
+        lp.leftMargin = x.toInt(); lp.topMargin = y.toInt()
+        movieView.layoutParams = lp
+        // under the frame when it has a hole for it, over it when the player is fullscreen
+        movieView.translationZ = if (full) 1f else 0f
     }
 
     /** Every finger on the screen, in the game's frame pixels (view coordinates through
@@ -152,7 +284,21 @@ class GameActivity : Activity() {
         }
     }
 
+    private var pausedByActivity = false
+
+    override fun onPause() {
+        super.onPause()
+        player?.let { if (it.isPlaying) { it.pause(); pausedByActivity = true } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (pausedByActivity) player?.let { try { it.start() } catch (_: Exception) {} }
+        pausedByActivity = false
+    }
+
     override fun onDestroy() {
+        releasePlayer()
         try { py.callAttr("stop") } catch (_: Throwable) {}
         super.onDestroy()
         // The emulator's state is per process; end this one so the next run starts clean.

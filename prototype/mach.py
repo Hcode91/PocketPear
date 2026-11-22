@@ -172,6 +172,14 @@ class MachMsg:
     def mig_host_get_clock_service(self, body, port):
         which, = struct.unpack_from('<i', body, 8)
         return ([self.k.new_port(f'clock{which}')], None)
+
+    def mig_clock_get_time(self, body, port):
+        # clock0 is SYSTEM_CLOCK (time since boot), clock1 CALENDAR_CLOCK (wall time)
+        import time
+        from sched import CLOCK
+        t = time.time() if self.k.pr.kind(port) == 'clock1' else CLOCK.now()
+        return struct.pack('<iIi', KERN_SUCCESS, int(t), int((t % 1) * 1e9))
+
     def mig_mach_port_deallocate(self, body, port): return struct.pack('<i', KERN_SUCCESS)
 
     # ---------------------------------------------------------------- threads
