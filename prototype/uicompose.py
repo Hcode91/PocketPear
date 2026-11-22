@@ -179,6 +179,31 @@ class Compositor:
                 layer = yield from self.send(w, 'layer')
                 yield from self.send(layer, 'renderInContext:', self.ctx)
                 drawn += 1
+                tree = os.environ.get('PP_UI_TREE', '')
+                if tree and str(self.count + 1) in tree.split(','):
+                    desc = yield from self.send(w, 'recursiveDescription')
+                    text = (yield from self.send(desc, 'UTF8String')) if desc else 0
+                    if text:
+                        tree_text = self.emu.cstr(text, 65536)
+                        print('[ui] view tree:\n' + tree_text)
+                        import re
+                        for m in re.finditer(r'<(UILabel|UIView|UIImageView): (0x[0-9a-f]+);([^\n]*)', tree_text):
+                            if 'hidden = YES' in m.group(3):
+                                continue
+                            v = int(m.group(2), 16)
+                            parts = []
+                            for selname in ('backgroundColor', 'textColor', 'text'):
+                                if selname != 'backgroundColor' and m.group(1) != 'UILabel':
+                                    continue
+                                o = yield from self.send(v, selname)
+                                if o:
+                                    d = yield from self.send(o, 'description')
+                                    c = (yield from self.send(d, 'UTF8String')) if d else 0
+                                    parts.append(f'{selname}={self.emu.cstr(c, 300) if c else "?"}')
+                                else:
+                                    parts.append(f'{selname}=nil')
+                            opq = (yield from self.send(v, 'isOpaque')) & 0xff
+                            print(f'[ui]   {m.group(1)} {m.group(2)}: opaque={opq} ' + ' '.join(parts))
             for layer, old in saved:
                 yield from self.send(layer, 'setBackgroundColor:', old)
                 yield (self.fn['_CGColorRelease'], [old])
@@ -189,9 +214,11 @@ class Compositor:
     def take(self, drawn):
         img = np.frombuffer(self.emu.read(self.buf, self.w * self.h * 4), np.uint8).reshape(self.h, self.w, 4).copy()
         key = (img[:, :, 0] == KEY[0]) & (img[:, :, 1] == KEY[1]) & (img[:, :, 2] == KEY[2]) & (img[:, :, 3] == KEY[3])
-        img[key] = 0
         from movie import MOVIE_KEY
         hole = (img[:, :, 0] == MOVIE_KEY[0]) & (img[:, :, 1] == MOVIE_KEY[1]) & (img[:, :, 2] == MOVIE_KEY[2]) & (img[:, :, 3] == MOVIE_KEY[3])
+        unblend(img, key, 1, 0)           # magenta: green is 0 in the key
+        unblend(img, hole, 0, 1)          # cyan: red is 0 in the key
+        img[key] = 0
         if hole.any():
             img[hole] = 0
             self.hole = hole
@@ -211,7 +238,7 @@ class Compositor:
             print(f'[ui] composition {self.count}: {drawn} window(s), {cover * 100:.0f}% of the screen covered by views,'
                   f' orientation {self.orientation}{movie}')
         dump = os.environ.get('PP_UI_DUMP')
-        if dump and self.overlay is not None and self.count <= 20:
+        if dump and self.overlay is not None and (self.count <= 20 or os.environ.get('PP_UI_DUMP_ALL')):
             from PIL import Image
             Image.fromarray(self.overlay, 'RGBA').save(os.path.join(dump, f'ui{self.count:03d}.png'))
         g = self.emu.gles
@@ -261,3 +288,32 @@ class Compositor:
         if hole is not None:
             out[hole] = 0
         return out.tobytes()
+
+
+def unblend(img, mask, zero, full):
+    """Antialiased edges of text and art drawn over a key colour are a mix of the two, and are
+    left as a coloured fringe once the key itself is cleared. Next to the key, a pixel on the line
+    between the key and a grey is taken as a grey of some coverage: in the key, channel `zero` is
+    0 and channel `full` 255, so for grey v at coverage a, zero = a*v and full = a*v + 255*(1-a).
+    The result is premultiplied, like the rest of the overlay. Coloured edges keep a little of the
+    key; text, the common case, comes out clean."""
+    if not mask.any():
+        return
+    near = mask.copy()
+    for _ in range(2):                    # pixels within two of the key
+        grown = near.copy()
+        grown[1:] |= near[:-1]; grown[:-1] |= near[1:]
+        grown[:, 1:] |= near[:, :-1]; grown[:, :-1] |= near[:, 1:]
+        near = grown
+    other = 3 - zero - full               # the key's third colour channel, 255 like `full`
+    z = img[:, :, zero].astype(np.int16)
+    f = img[:, :, full].astype(np.int16)
+    o = img[:, :, other].astype(np.int16)
+    edge = near & ~mask & (img[:, :, 3] == 255) & (np.abs(f - o) <= 2) & (f > z + 8)
+    if not edge.any():
+        return
+    a = 255 - (f - z)                     # coverage 0..255
+    v = z                                 # premultiplied grey
+    for c in range(3):
+        img[:, :, c][edge] = np.clip(v, 0, 255)[edge].astype(np.uint8)
+    img[:, :, 3][edge] = np.clip(a, 0, 255)[edge].astype(np.uint8)

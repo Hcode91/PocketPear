@@ -287,6 +287,10 @@ class Emulator:
         self.movies = Movies(self)
         if not os.environ.get('PP_NO_MOVIE'):
             self.movies.install(self.stubs)
+        from ios7 import Ios7
+        self.ios7 = Ios7(self)
+        if not os.environ.get('PP_NO_IOS7'):
+            self.ios7.install(self.stubs)
         from imports import MissingImports
         self.missing_imports = MissingImports(self)
         self.missing_imports.install(exe, system_defined)
