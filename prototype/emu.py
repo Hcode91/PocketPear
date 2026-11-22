@@ -568,11 +568,15 @@ class Emulator:
             if time.time() - last_beat > float(os.environ.get('PP_HEARTBEAT', 15)):
                 last_beat = time.time()
                 pass
-                print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls')
-                # A game that has gone quiet (few calls since the last beat) is usually waiting
-                # for something that never comes: show where each thread waits, a few times.
-                quiet = self.kernel.calls - getattr(self, 'beat_calls', 0) < 20000
-                self.beat_calls = self.kernel.calls
+                g = getattr(self, 'gles', None)
+                print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls'
+                      + (f', {g.frame} frames presented, {g.draws} draws since the last' if g is not None else ''))
+                # A game that has gone quiet (its clock runs on, but it makes few calls) is
+                # usually waiting for something that never comes: show where each thread waits,
+                # a few times. Loading is not quiet: the clock barely moves while files are read.
+                quiet = (self.kernel.calls - getattr(self, 'beat_calls', 0) < 20000
+                         and CLOCK.now() - getattr(self, 'beat_time', 0.0) > 5)
+                self.beat_calls, self.beat_time = self.kernel.calls, CLOCK.now()
                 bt = int(os.environ.get('PP_BT_THREADS', 0))
                 if not bt and quiet and getattr(self, 'quiet_dumps', 0) < 3:
                     self.quiet_dumps = getattr(self, 'quiet_dumps', 0) + 1
