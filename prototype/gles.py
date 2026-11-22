@@ -9,6 +9,7 @@ arguments in core registers (softfp), so every argument starts as a 32-bit word.
 import ctypes
 import os
 import struct
+import time
 
 from unicorn.arm_const import *
 
@@ -146,6 +147,8 @@ class GLES:
             if not str(emu.info.get('UIInterfaceOrientation', '')).endswith('Portrait') else False
         self.landscape = landscape
         self.layer_scale = {}        # CAEAGLLayer -> contentsScale, when the app set one
+        self.drawable_layers = set() # CAEAGLLayers given renderbuffer storage (uicompose keys them out)
+        self.last_present = 0.0      # wall time of the last presented GL frame
         w, h = getattr(emu, 'screen_points', (320, 568))
         self.scale = 2.0
         self.screen = (h * 2, w * 2) if landscape else (w * 2, h * 2)
@@ -353,6 +356,8 @@ class GLES:
         self.scale = self.layer_scale.get(layer, 1.0) or 1.0
         w, h = int(round((ph if self.landscape else pw) * self.scale)), int(round((pw if self.landscape else ph) * self.scale))
         self.screen = (w, h)
+        if layer:
+            self.drawable_layers.add(layer)
         _gl.glRenderbufferStorage(target, 0x8058, w, h)      # GL_RGBA8_OES
         print(f'[gles] renderbuffer storage from drawable {layer:#x}: {w}x{h}')
         self.ret(1)
@@ -360,13 +365,32 @@ class GLES:
     def eagl_present(self):
         guest, _cmd, target = self.args(3)
         self.frame += 1
-        if self.frame_sink is not None:
-            self.frame_sink(self.read_frame(), *self.screen)
+        self.last_present = time.time()
         every = int(os.environ.get('PP_FRAME_EVERY', 30))
-        if self.out_dir and (self.frame == 1 or self.frame % every == 0):
-            self.save_frame()
+        save = self.out_dir and (self.frame == 1 or self.frame % every == 0)
+        if self.frame_sink is not None or save:
+            rgba = self.read_frame()
+            ui = getattr(self.emu, 'ui', None)
+            if ui is not None and ui.overlay is not None:
+                rgba = ui.over(rgba, *self.screen)
+            if self.frame_sink is not None:
+                self.frame_sink(rgba, *self.screen)
+            if save:
+                self.save_frame(rgba)
         self.draws = self.client_draws = 0
         self.ret(1)
+
+    def present_ui_only(self):
+        """Show the UIKit views alone, for an app that presents no GL frames (or none lately)."""
+        ui = self.emu.ui
+        w, h = self.screen
+        rgba = ui.over(bytes(w * h * 4), w, h)
+        self.frame += 1
+        if self.frame_sink is not None:
+            self.frame_sink(rgba, w, h)
+        every = int(os.environ.get('PP_FRAME_EVERY', 30))
+        if self.out_dir and (self.frame == 1 or self.frame % every == 0):
+            self.save_frame(rgba)
 
     def read_frame(self):
         """The presented renderbuffer as RGBA bytes, bottom row first (GL order)."""
@@ -385,9 +409,10 @@ class GLES:
         _gl.glDeleteFramebuffers(1, ctypes.byref(fbo))
         return bytes(buf)
 
-    def save_frame(self):
+    def save_frame(self, buf=None):
         w, h = self.screen
-        buf = self.read_frame()
+        if buf is None:
+            buf = self.read_frame()
         try:
             from PIL import Image
             img = Image.frombuffer('RGBA', (w, h), bytes(buf), 'raw', 'RGBA', 0, -1)

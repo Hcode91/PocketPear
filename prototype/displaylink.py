@@ -178,6 +178,9 @@ class DisplayLinks:
 
     def main_waiting(self):
         main = self.emu.sched.threads[0]
+        ui = getattr(self.emu, 'ui', None)
+        if ui is not None and ui.calls is not None and ui.calls.busy():
+            return False
         return not main.dead and main.ready is not None and main.why.startswith('mach_msg receive')
 
     def deliver(self):

@@ -279,6 +279,10 @@ class Emulator:
         self.displaylinks = DisplayLinks(self)
         if not os.environ.get('PP_NO_DISPLAYLINK'):
             self.displaylinks.install(self.stubs)
+        from uicompose import Compositor
+        self.ui = Compositor(self)
+        if not os.environ.get('PP_NO_UI'):
+            self.ui.install(self.stubs)
         from imports import MissingImports
         self.missing_imports = MissingImports(self)
         self.missing_imports.install(exe, system_defined)
@@ -351,7 +355,7 @@ class Emulator:
 
     def next_external(self):
         """The next thing due from outside the guest: a display link tick or a scripted touch."""
-        ds = [d for d in (self.displaylinks.next_due(), self.kernel.touches.next_due()) if d is not None]
+        ds = [d for d in (self.displaylinks.next_due(), self.ui.next_due(), self.kernel.touches.next_due()) if d is not None]
         return min(ds) if ds else None
 
     def preset_screen(self):
@@ -527,6 +531,7 @@ class Emulator:
         self.quit = False
         while self.kernel.exited is None and not self.quit:
             self.displaylinks.deliver()
+            self.ui.deliver()
             self.kernel.touches.deliver(CLOCK.now())
             t, state = self.sched.pick()
             if t is None and state == 'external':

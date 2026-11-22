@@ -18,6 +18,10 @@ class RenderServer(MigServer):
 
     def default(self, req):
         # Most routines here only return a code; answer success and see what the app does.
+        # Anything else the app sends (commits, mostly) may have changed what it shows.
+        ui = getattr(self.k.emu, 'ui', None)
+        if ui is not None:
+            ui.mark_dirty()
         return self.reply(req, ret=0)
 
     def msg_40215(self, req):
