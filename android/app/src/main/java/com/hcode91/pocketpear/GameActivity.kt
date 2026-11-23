@@ -158,10 +158,19 @@ class GameActivity : Activity() {
                         if (player !== mp) return@setOnPreparedListener
                         it.start()
                         note("[movie] host player $id prepared: ${it.videoWidth}x${it.videoHeight}, ${it.duration / 1000.0} s")
+                        try {
+                            val tracks = it.trackInfo.joinToString { t -> "${t.trackType}:${t.format?.getString(android.media.MediaFormat.KEY_MIME)}" }
+                            note("[movie] host player $id tracks: $tracks")
+                        } catch (e: Exception) { note("[movie] tracks: $e") }
+                        logDecoders(path)
                         val secs = it.duration / 1000.0
                         val w = it.videoWidth
                         val h = it.videoHeight
                         touches.execute { py.callAttr("movie_info", id, secs, w, h) }
+                    }
+                    mp.setOnInfoListener { _, what, extra ->
+                        note("[movie] host player $id info $what/$extra")
+                        false
                     }
                     mp.setOnCompletionListener {
                         if (player === mp && !mp.isLooping) {
@@ -234,9 +243,11 @@ class GameActivity : Activity() {
         try {
             val pic = movieView.getBitmap(32, 18)
             var sum = 0L
+            var peak = 0
             if (pic != null) for (y in 0 until pic.height) for (x in 0 until pic.width) {
                 val c = pic.getPixel(x, y)
                 sum += Color.red(c) + Color.green(c) + Color.blue(c)
+                peak = maxOf(peak, Color.red(c), Color.green(c), Color.blue(c))
             }
             val bright = if (pic != null) sum / (3 * pic.width * pic.height) else -1
             val b = bitmap
@@ -249,11 +260,36 @@ class GameActivity : Activity() {
                 val fy = ((cy - (image.height - b.height * s) / 2) / s).toInt().coerceIn(0, b.height - 1)
                 alpha = Color.alpha(b.getPixel(fx, fy))
             }
-            note("[movie] after ${secs}s: picture brightness $bright/255, view ${movieView.width}x${movieView.height} " +
+            note("[movie] after ${secs}s: picture brightness $bright/255 (brightest $peak), view ${movieView.width}x${movieView.height} " +
                  "${if (movieView.visibility == View.VISIBLE) "visible" else "hidden"} z=${movieView.translationZ}, " +
                  "frame alpha over its centre $alpha, playing=${player?.isPlaying}")
         } catch (e: Exception) {
             note("[movie] probe failed: $e")
+        }
+    }
+
+    /** Which of the phone's decoders take each video track of a movie, at its size. */
+    private fun logDecoders(path: String) {
+        try {
+            val ex = android.media.MediaExtractor()
+            ex.setDataSource(path)
+            val list = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS)
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                if (!mime.startsWith("video/")) continue
+                val w = if (f.containsKey(android.media.MediaFormat.KEY_WIDTH)) f.getInteger(android.media.MediaFormat.KEY_WIDTH) else 0
+                val h = if (f.containsKey(android.media.MediaFormat.KEY_HEIGHT)) f.getInteger(android.media.MediaFormat.KEY_HEIGHT) else 0
+                val names = list.codecInfos.filter { !it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }.map { ci ->
+                    val ok = try { ci.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(w, h) } catch (_: Exception) { null }
+                    "${ci.name}${if (ok == false) " (not ${w}x$h)" else ""}"
+                }
+                note("[movie] track $i $mime ${w}x$h decoders: ${names.ifEmpty { listOf("none") }.joinToString()} " +
+                     "(the phone picks: ${list.findDecoderForFormat(f) ?: "none"})")
+            }
+            ex.release()
+        } catch (e: Exception) {
+            note("[movie] decoder check failed: $e")
         }
     }
 
