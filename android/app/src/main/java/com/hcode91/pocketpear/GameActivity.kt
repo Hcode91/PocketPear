@@ -91,7 +91,8 @@ class GameActivity : Activity() {
         // from the game list the speed setting comes along; a shortcut reads the current one
         val realtime = if (intent.hasExtra("realtime")) intent.getBooleanExtra("realtime", false)
                        else getSharedPreferences("games", MODE_PRIVATE).getBoolean("realtime:$app", false)
-        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener(), realtime) }, "pocketpear-emu").apply {
+        val turn = getSharedPreferences("games", MODE_PRIVATE).getString("turn:$app", "auto") ?: "auto"
+        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener(), realtime, turn) }, "pocketpear-emu").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }

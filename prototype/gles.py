@@ -130,6 +130,14 @@ def bits_to_float(w):
     return struct.unpack('<f', struct.pack('<I', w & 0xffffffff))[0]
 
 
+
+# Games that draw landscape into a portrait renderbuffer without saying so: no orientation in
+# Info.plist, and they never set the status bar's. Marmalade (Airplay) games turn their own
+# picture and leave UIKit in portrait.
+KNOWN_TURNS = {
+    'jp.co.capcom.residentevil.en': 'ccw',     # Resident Evil Degeneration
+}
+
 class GLES:
     def __init__(self, emu):
         self.emu = emu
@@ -461,6 +469,16 @@ class GLES:
         w, h = self.screen
         if w >= h:
             return None
+        # the player's choice for this game (PP_TURN: cw, ccw or none), then games known to
+        # say nothing anywhere about how they are held
+        chosen = os.environ.get('PP_TURN', '').lower()
+        if chosen in ('cw', 'ccw'):
+            return chosen
+        if chosen == 'none':
+            return None
+        known = KNOWN_TURNS.get(str(self.emu.info.get('CFBundleIdentifier', '')))
+        if known:
+            return known
         o = str(self.emu.info.get('UIInterfaceOrientation', ''))
         if 'Landscape' in o:
             return 'cw' if o.endswith('LandscapeLeft') else 'ccw'

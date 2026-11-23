@@ -128,6 +128,21 @@ class MainActivity : Activity() {
     private fun prefs() = getSharedPreferences("games", MODE_PRIVATE)
     private fun realtime(path: String) = prefs().getBoolean("realtime:$path", false)
 
+    // How a landscape game drawn into a portrait picture is turned to stand upright. Most games
+    // say so themselves; this is for the ones that don't (and stays "auto" otherwise).
+    private val turns = arrayOf("auto", "ccw", "cw", "none")
+    private val turnNames = arrayOf("automatic", "anticlockwise", "clockwise", "not turned")
+    private fun turnLabel(path: String) = turnNames[turns.indexOf(prefs().getString("turn:$path", "auto")).coerceAtLeast(0)]
+    private fun chooseTurn(name: String, path: String) {
+        val now = turns.indexOf(prefs().getString("turn:$path", "auto")).coerceAtLeast(0)
+        AlertDialog.Builder(this).setTitle("Turn $name's picture")
+            .setSingleChoiceItems(turnNames, now) { d, which ->
+                prefs().edit().putString("turn:$path", turns[which]).apply()
+                toast("$name: ${turnNames[which]}, from its next start.")
+                d.dismiss()
+            }.show()
+    }
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
@@ -211,8 +226,10 @@ class MainActivity : Activity() {
                     val clock = if (realtime(path)) "Game speed: real time (tap for slow motion)"
                                 else "Game speed: slow motion when behind (tap for real time)"
                     AlertDialog.Builder(this@MainActivity).setTitle(name)
-                        .setItems(arrayOf("Clear game data", "Remove game", clock, "Add to home screen")) { _, which ->
-                            if (which == 3) addShortcut(name, path)
+                        .setItems(arrayOf("Clear game data", "Remove game", clock, "Add to home screen",
+                                          "Turn picture: ${turnLabel(path)}")) { _, which ->
+                            if (which == 4) chooseTurn(name, path)
+                            else if (which == 3) addShortcut(name, path)
                             else if (which == 2) {
                                 val on = !realtime(path)
                                 prefs().edit().putBoolean("realtime:$path", on).apply()

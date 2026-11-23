@@ -315,13 +315,15 @@ class _Log:
         self.f.flush()
 
 
-def run(files_dir, app_path, listener, realtime=False):
+def run(files_dir, app_path, listener, realtime=False, turn='auto'):
     """Run a game until it exits or stop() is called. Blocks; call it on its own thread.
     realtime: the game's clock follows the real one, so a game too heavy for the phone plays
     at its proper speed with fewer frames, rather than in slow motion (the paced default)."""
     global _emu, _log
     import sched
     os.environ['PP_CLOCK'] = 'real' if realtime else 'paced'
+    # turn: how to turn a landscape game drawn into a portrait picture (cw, ccw, none), or auto
+    os.environ['PP_TURN'] = '' if turn in (None, 'auto') else str(turn)
     sched.CLOCK.__init__()
     log = _Log(os.path.join(files_dir, 'run.log'), listener)
     _log = log

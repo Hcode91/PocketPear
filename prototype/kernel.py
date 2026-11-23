@@ -194,6 +194,8 @@ class Kernel:
         if num & 0x80000000:
             num -= 1 << 32
         self.calls += 1
+        if num != 116:                      # anything but gettimeofday ends a spin on the clock
+            self.emu.sched.cur.clock_spin = 0
         if self.call_counts is not None:
             self.call_counts[BSD_NAMES.get(num, num) if num > 0 else MACH_NAMES.get(-num, num)] += 1
         if self.calls == TRACE_FROM:
@@ -507,6 +509,24 @@ class Kernel:
             self.emu.write(tv, struct.pack('<ii', int(now), int((now % 1) * 1e6)))
         # libsystem's gettimeofday stub returns seconds/usecs in r0/r1 as well
         self.ret(int(now), value_hi=int((now % 1) * 1e6))
+        # A thread that does nothing but read the clock is waiting for time to pass (Resident
+        # Evil Degeneration's frame limiter: 100,000 calls a second, each a trip through the
+        # kernel here, so the game ran at a sixth of its speed). After a run of them, let it
+        # sleep for a millisecond, which a waiting loop cannot tell from a busy one.
+        # Only calls close together count: a loader that works in slices and checks the clock
+        # between them (Bioshock) is busy, not waiting.
+        t = self.emu.sched.cur
+        close = now - getattr(t, 'clock_last', -1.0) < 20e-6
+        t.clock_last = now
+        t.clock_spin = getattr(t, 'clock_spin', 0) + 1 if close else 0
+        if t.clock_spin >= 32:
+            t.clock_spin = 0
+            def woken(timed_out):
+                later = CLOCK.wall()
+                if tv:
+                    self.emu.write(tv, struct.pack('<ii', int(later), int((later % 1) * 1e6)))
+                self.ret(int(later), value_hi=int((later % 1) * 1e6))
+            self.emu.sched.block('clock spin', lambda: False, woken, 0.001)
 
     def sys_getrlimit(self):
         res, p = self.args(2)
