@@ -313,7 +313,12 @@ def run(files_dir, app_path, listener, realtime=False):
                     listener.onMovieRect(*rect)
             listener.onFrame(np.ascontiguousarray(img).tobytes(), w, h)
 
+        import mp4fix
+        movie_cache = os.path.join(files_dir, 'cache', 'movies')
+
         def movie_event(event, pid, path, repeat):
+            if path and event in ('play', 'resume'):
+                path = mp4fix.even_sized(path, movie_cache)   # odd sizes: no Android decoder takes them
             listener.onMovie(event, pid, path or '', bool(repeat))
             if event in ('play', 'restart'):
                 movie_rect[0] = None
