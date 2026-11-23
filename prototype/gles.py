@@ -171,6 +171,8 @@ class GLES:
             if not str(emu.info.get('UIInterfaceOrientation', '')).endswith('Portrait') else False
         self.landscape = landscape
         self.layer_scale = {}        # CAEAGLLayer -> contentsScale, when the app set one
+        self.calls = None
+        self.fn = {}
         self.drawable_layers = set() # CAEAGLLayers given renderbuffer storage (uicompose keys them out)
         self.last_present = 0.0      # wall time of the last presented GL frame
         w, h = getattr(emu, 'screen_points', (320, 568))
@@ -297,6 +299,10 @@ class GLES:
     # ------------------------------------------------------------------------ install
     def install(self, stubs, syms):
         """syms: name -> address for OpenGLES.framework; thumb: set of Thumb addresses."""
+        from guestcall import InlineCalls
+        self.calls = InlineCalls(self.emu, stubs)
+        self.fn = {n.split(' (')[0]: a for n, a in zip(self.emu.syms.names, self.emu.syms.addrs)
+                   if n in ('_objc_msgSend_stret (libobjc.A.dylib)', '_sel_registerName (libobjc.A.dylib)')}
         ES1_NAMES.update(_es1_names())
         made = native = 0
         plain = not os.environ.get('GL_ERRORS') and not os.environ.get('PP_GL_FIRST')
@@ -465,13 +471,40 @@ class GLES:
         guest, _cmd, target, layer = self.args(4)
         pw, ph = getattr(self.emu, 'screen_points', (320, 568))
         self.scale = self.layer_scale.get(layer, 1.0) or 1.0
-        w, h = int(round((ph if self.landscape else pw) * self.scale)), int(round((pw if self.landscape else ph) * self.scale))
-        self.screen = (w, h)
-        if layer:
-            self.drawable_layers.add(layer)
-        _gl.glRenderbufferStorage(target, 0x8058, w, h)      # GL_RGBA8_OES
-        print(f'[gles] renderbuffer storage from drawable {layer:#x}: {w}x{h}')
-        self.ret(1)
+        # the size the layer guessed from Info.plist, unless the layer says otherwise below
+        size = [(ph if self.landscape else pw), (pw if self.landscape else ph)]
+
+        def store():
+            w, h = int(round(size[0] * self.scale)), int(round(size[1] * self.scale))
+            self.screen = (w, h)
+            if layer:
+                self.drawable_layers.add(layer)
+            _gl.glRenderbufferStorage(target, 0x8058, w, h)      # GL_RGBA8_OES
+            print(f'[gles] renderbuffer storage from drawable {layer:#x}: {w}x{h}')
+
+        def g():
+            # the renderbuffer takes the layer's own size, as on the phone: a game from before
+            # UIKit turned GL views (N.O.V.A.) draws into a portrait layer and turns its own
+            # picture, even when Info.plist lists only landscape orientations
+            if layer and self.calls is not None and '_objc_msgSend_stret' in self.fn:
+                if not getattr(self, '_rect_buf', 0):
+                    self._rect_buf = self.emu.find_free(0x1000)
+                    self.emu.map(self._rect_buf, 0x1000)
+                    self.emu.write(self._rect_buf + 16, b'bounds\0')
+                sel, _ = yield (self.fn['_sel_registerName'], [self._rect_buf + 16])
+                self.emu.write(self._rect_buf, bytes(16))
+                yield (self.fn['_objc_msgSend_stret'], [self._rect_buf, layer, sel])
+                _x, _y, bw, bh = struct.unpack('<4f', self.emu.read(self._rect_buf, 16))
+                if bw >= 1 and bh >= 1 and (bw > bh) != (size[0] > size[1]):
+                    print(f'[gles] layer {layer:#x} is {bw:g}x{bh:g} points; the renderbuffer follows it')
+                    size[0], size[1] = int(round(bw)), int(round(bh))
+            self.on_own_context(store)()
+            return 1
+        if self.calls is not None:
+            self.calls.run(g())
+        else:
+            store()
+            self.ret(1)
 
     def eagl_present(self):
         guest, _cmd, target = self.args(3)
