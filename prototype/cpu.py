@@ -64,7 +64,8 @@ def lib():
                                 ('ppcpu_gl_indexed', None, [P, U32, U32]),
                                 ('ppcpu_gl_fn', None, [P, U32, P, I, ctypes.c_char_p, I, I]),
                                 ('ppcpu_gl_tid', None, [P, U32]),
-                                ('ppcpu_tex_target', U32, [P, U32])]:
+                                ('ppcpu_tex_target', U32, [P, U32]),
+                                ('ppcpu_executed', ctypes.c_uint64, [P])]:
             f = getattr(L, name, None)
             if f is not None:
                 f.restype, f.argtypes = res, args
@@ -131,6 +132,11 @@ class DynUc:
 
     def gl_fn(self, n, fn, kind, spec, ret, comps):
         self.L.ppcpu_gl_fn(self.h, n, fn, kind, spec.encode(), ord(ret), comps)
+
+    def executed(self):
+        """Instructions run so far, or None from a library that does not count them."""
+        f = getattr(self.L, 'ppcpu_executed', None)
+        return f(self.h) if f is not None else None
 
     def tex_target(self, name):
         return self.L.ppcpu_tex_target(self.h, name)

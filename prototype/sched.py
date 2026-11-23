@@ -63,10 +63,26 @@ class Clock:
         time.sleep(min(due - host, 0.02))
         self.t = max(self.t, min(when, g0 + (time.monotonic() - r0)))
 
+    def keep_pace(self):
+        """Paced: guest time that ran ahead of the wall clock without waiting (a game spinning
+        on its own frame limiter, which yields but never sleeps) waits for it here."""
+        if not self.paced:
+            return
+        g0, r0 = self.sync
+        due = r0 + (self.t - g0)
+        host = time.monotonic()
+        if due > host + 0.002:
+            time.sleep(min(due - host, 0.02))
+        elif due < host - 0.1:
+            self.sync = (self.t, host)        # behind: never made up for later
+
     def nudge(self):
         """Each time query moves virtual time on a little so loops reading it see it move."""
         if not self.real:
             self.t += 1e-6
+            charge = getattr(self, 'charge', None)
+            if charge is not None:
+                charge()
 
 
 CLOCK = Clock()

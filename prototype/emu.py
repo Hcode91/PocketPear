@@ -555,6 +555,20 @@ class Emulator:
         guest_samples = collections.Counter() if os.environ.get('PP_GUEST_SAMPLE') else None
         self.quit = False
         set_tid = getattr(self.uc, 'set_tid', lambda tid: None)
+        executed_fn = getattr(self.uc, 'executed', None)
+        INSN_RATE = float(os.environ.get('PP_INSN_RATE', 1e9))     # 0 turns the charge off
+        if not INSN_RATE or not executed_fn or executed_fn() is None:
+            executed_fn = None
+        last_insns = [executed_fn() if executed_fn else 0]
+
+        def charge():
+            # also on every time query: a thread that never waits (a frame loop whose limiter
+            # did not wait) must still see time pass while it runs
+            if executed_fn is not None:
+                n = executed_fn()
+                CLOCK.tick((n - last_insns[0]) / INSN_RATE)
+                last_insns[0] = n
+        CLOCK.charge = charge
         while self.kernel.exited is None and not self.quit:
             self.displaylinks.deliver()
             self.ui.deliver()
@@ -619,6 +633,12 @@ class Emulator:
                     for (tid, fn), c in by.most_common(15):
                         print(f'    {c * 100 / n:5.1f}%  thread {tid}  {fn}')
                     guest_samples.clear()
+                for a in filter(None, os.environ.get('PP_PEEK', '').split(',')):
+                    try:
+                        v = self.r32(int(a, 16))
+                        print(f'[emu] peek {a}: {v:#x} ({struct.unpack("<f", struct.pack("<I", v))[0]:g})')
+                    except Exception as e:
+                        print(f'[emu] peek {a}: {e}')
                 if self.kernel.call_counts:
                     print('[emu] calls since the last heartbeat: ' + ', '.join(
                         f'{n} {c}' for n, c in self.kernel.call_counts.most_common(25)))
@@ -645,7 +665,13 @@ class Emulator:
                 if bt:
                     self.uc.context_restore(t.ctx)
             pass
+            # guest time: a little for every slice, and the instructions it ran at the rate of
+            # the phone the game was made for. A frame that cost no guest time would read as
+            # no time passing at all: Splinter Cell's frame limiter waits only when the frame
+            # took a millisecond or more, so it ran three times too fast.
+            charge()
             CLOCK.tick(0.0005)
+            CLOCK.keep_pace()
             executed += slice_insns
             if max_insns and executed >= max_insns:
                 print('[emu] instruction limit reached')

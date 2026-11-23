@@ -209,6 +209,7 @@ struct CPU final : Dynarmic::A32::UserCallbacks {
     int reason = STOPPED;
     u32 info0 = 0, info1 = 0;
     u64 ticks_left = 0;
+    u64 executed = 0;               // instructions run, in total (guest time is charged for them)
 
     CPU() : pages(std::make_unique<std::array<u8*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>>()) {
         pages->fill(nullptr);
@@ -430,6 +431,7 @@ struct CPU final : Dynarmic::A32::UserCallbacks {
             ticks_left = budget;
             auto hr = jit->Run();
             jit->ClearHalt(HALTS);
+            executed += budget - std::min(budget, ticks_left);
             if (reason != STOPPED || Dynarmic::Has(hr, Dynarmic::HaltReason::UserDefined2)) break;
             if (count) {
                 u64 done = budget - std::min(budget, ticks_left);
@@ -641,6 +643,9 @@ EXPORT int ppcpu_run(void* c, u64 count, u64 timeout_us, u32* info0, u32* info1)
     *info1 = cpu->info1;
     return r;
 }
+
+// Instructions run so far (all threads), for charging guest time.
+EXPORT u64 ppcpu_executed(void* c) { return static_cast<CPU*>(c)->executed; }
 
 // One instruction, with code hooks bypassed (to run a hooked instruction after its hook).
 EXPORT int ppcpu_step(void* c, u32* info0, u32* info1) {
