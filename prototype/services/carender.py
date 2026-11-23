@@ -41,3 +41,17 @@ class RenderServer(MigServer):
         self.k.render_contexts = getattr(self.k, 'render_contexts', []) + [ctx]
         print(f'[carender] client {req.args[:4].hex()} registered, context {ctx:#x}')
         return self.reply(req, data=struct.pack('<II', ctx, 0), ports=[(self.port, 0x11)])
+
+    def msg_40201(self, req):
+        # A simple routine (no reply port in the header) carrying a send-once right the client
+        # then waits on with no timeout: QuartzCore sends it while displaying a layer whose
+        # backing store buffers the server may still hold, and waits until the server says it
+        # is done with them. Nothing here holds them, so answer at once. Unanswered, the
+        # main thread waits for ever in the middle of a commit: Resident Evil Degeneration
+        # (Marmalade) draws its loading screen with -drawRect: twice and then stops.
+        if not req.ports:
+            return None
+        import copy
+        r = copy.copy(req)
+        r.local = req.ports[0][0]
+        return self.reply(r, ret=0)

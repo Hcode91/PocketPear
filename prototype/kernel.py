@@ -5,6 +5,7 @@ reports failure by setting the carry flag with the errno in r0.
 """
 import errno
 import os
+import posixpath
 import stat as pystat
 import struct
 import time
@@ -1098,7 +1099,14 @@ class Kernel:
         host = self.emu.host_path(e[1])
         if gfd not in self.dirs:
             try:
-                names = ['.', '..'] + sorted(os.listdir(host))
+                names = sorted(os.listdir(host))
+                # on the phone the app's container holds its bundle beside Documents and
+                # Library; here the bundle lives elsewhere, so list it: Marmalade games find
+                # their data by looking in $HOME for the entry ending in .app
+                app_dir, app_name = posixpath.split(self.emu.app_guest.rstrip('/'))
+                if posixpath.normpath(e[1]) == app_dir and app_name not in names:
+                    names = sorted(names + [app_name])
+                names = ['.', '..'] + names
             except OSError as err:
                 self.ret(err.errno, True); return
             self.dirs[gfd] = [names, 0]
@@ -1110,6 +1118,8 @@ class Kernel:
             if len(out) + reclen > size:
                 break
             full = os.path.join(host, names[pos])
+            if not os.path.lexists(full):
+                full = self.emu.host_path(posixpath.join(e[1], names[pos]))
             try:
                 st = os.lstat(full)
                 ino, mode = st.st_ino, st.st_mode
