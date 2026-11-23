@@ -217,8 +217,43 @@ class GameActivity : Activity() {
             override fun onSurfaceTextureSizeChanged(t: SurfaceTexture, w: Int, h: Int) {}
             override fun onSurfaceTextureDestroyed(t: SurfaceTexture) = true
             override fun onSurfaceTextureUpdated(t: SurfaceTexture) {
-                if (!firstPicture) { firstPicture = true; note("[movie] host player $playerId shows its first picture") }
+                if (!firstPicture) {
+                    firstPicture = true
+                    note("[movie] host player $playerId shows its first picture")
+                    val id = playerId
+                    for (secs in intArrayOf(3, 10, 30)) ui.postDelayed({ if (id == playerId) probeMovie(secs) }, secs * 1000L)
+                }
             }
+        }
+    }
+
+    /** Says what is actually on screen where the movie plays: how bright the video's own picture
+     *  is, and how see-through the game's frame is over the movie view's centre. A dark picture
+     *  points at the decoder; an opaque frame at the composition. */
+    private fun probeMovie(secs: Int) {
+        try {
+            val pic = movieView.getBitmap(32, 18)
+            var sum = 0L
+            if (pic != null) for (y in 0 until pic.height) for (x in 0 until pic.width) {
+                val c = pic.getPixel(x, y)
+                sum += Color.red(c) + Color.green(c) + Color.blue(c)
+            }
+            val bright = if (pic != null) sum / (3 * pic.width * pic.height) else -1
+            val b = bitmap
+            val cx = movieView.x + movieView.width / 2f
+            val cy = movieView.y + movieView.height / 2f
+            var alpha = -1
+            if (b != null && image.width > 0 && image.height > 0) {
+                val s = minOf(image.width.toFloat() / b.width, image.height.toFloat() / b.height)
+                val fx = ((cx - (image.width - b.width * s) / 2) / s).toInt().coerceIn(0, b.width - 1)
+                val fy = ((cy - (image.height - b.height * s) / 2) / s).toInt().coerceIn(0, b.height - 1)
+                alpha = Color.alpha(b.getPixel(fx, fy))
+            }
+            note("[movie] after ${secs}s: picture brightness $bright/255, view ${movieView.width}x${movieView.height} " +
+                 "${if (movieView.visibility == View.VISIBLE) "visible" else "hidden"} z=${movieView.translationZ}, " +
+                 "frame alpha over its centre $alpha, playing=${player?.isPlaying}")
+        } catch (e: Exception) {
+            note("[movie] probe failed: $e")
         }
     }
 
