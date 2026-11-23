@@ -80,11 +80,18 @@ class GameActivity : Activity() {
             translationZ = 2f
         }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
         setContentView(root)
+        val app = intent.getStringExtra("app")
+        // a home screen shortcut can outlive its game
+        if (app == null || !java.io.File(app).isDirectory) {
+            Toast.makeText(this, "${intent.getStringExtra("name") ?: "This game"} is no longer installed in PocketPear.", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         say("Starting ${intent.getStringExtra("name")}... (the first frame takes a few minutes)")
-
-        val app = intent.getStringExtra("app")!!
-        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener(),
-                intent.getBooleanExtra("realtime", false)) }, "pocketpear-emu").apply {
+        // from the game list the speed setting comes along; a shortcut reads the current one
+        val realtime = if (intent.hasExtra("realtime")) intent.getBooleanExtra("realtime", false)
+                       else getSharedPreferences("games", MODE_PRIVATE).getBoolean("realtime:$app", false)
+        Thread({ py.callAttr("run", filesDir.absolutePath, app, Listener(), realtime) }, "pocketpear-emu").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }

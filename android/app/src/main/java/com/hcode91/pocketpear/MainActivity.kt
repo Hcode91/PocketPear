@@ -18,6 +18,15 @@ import android.view.View
 import android.widget.Button
 import android.widget.ImageView
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
+import android.graphics.drawable.Icon
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
 import android.graphics.Outline
 import android.view.ViewOutlineProvider
 import android.widget.LinearLayout
@@ -174,8 +183,9 @@ class MainActivity : Activity() {
                     val clock = if (realtime(path)) "Game speed: real time (tap for slow motion)"
                                 else "Game speed: slow motion when behind (tap for real time)"
                     AlertDialog.Builder(this@MainActivity).setTitle(name)
-                        .setItems(arrayOf("Clear game data", "Remove game", clock)) { _, which ->
-                            if (which == 2) {
+                        .setItems(arrayOf("Clear game data", "Remove game", clock, "Add to home screen")) { _, which ->
+                            if (which == 3) addShortcut(name, path)
+                            else if (which == 2) {
                                 val on = !realtime(path)
                                 prefs().edit().putBoolean("realtime:$path", on).apply()
                                 toast(if (on) "$name keeps real time: proper speed, fewer frames when the phone can't keep up."
@@ -188,7 +198,12 @@ class MainActivity : Activity() {
                                 .setNegativeButton("Cancel", null).show()
                             else AlertDialog.Builder(this@MainActivity).setTitle("Remove $name?")
                                 .setMessage("Its saves and settings are kept.")
-                                .setPositiveButton("Remove") { _, _ -> py.callAttr("remove_app", path); refresh() }
+                                .setPositiveButton("Remove") { _, _ ->
+                                    py.callAttr("remove_app", path)
+                                    getSystemService(ShortcutManager::class.java)?.disableShortcuts(
+                                        listOf(shortcutId(path)), "$name was removed from PocketPear.")
+                                    refresh()
+                                }
                                 .setNegativeButton("Cancel", null).show()
                         }.show()
                     true
@@ -196,6 +211,54 @@ class MainActivity : Activity() {
             })
             list.addView(View(this).apply { setBackgroundColor(Color.DKGRAY) }, LinearLayout.LayoutParams(-1, 1))
         }
+    }
+
+    private fun shortcutId(path: String) = "game:" + java.io.File(path).name
+
+    /** A home screen icon that starts the game straight away, with the game's own icon. */
+    private fun addShortcut(name: String, path: String) {
+        val sm = getSystemService(ShortcutManager::class.java)
+        if (sm == null || !sm.isRequestPinShortcutSupported) {
+            toast("This home screen app doesn't let other apps add icons to it.")
+            return
+        }
+        Thread {
+            val file = try { py.callAttr("app_icon", filesDir.absolutePath, path).toString() } catch (e: Exception) { "" }
+            val bmp = if (file.isNotEmpty()) BitmapFactory.decodeFile(file) else null
+            ui.post {
+                val icon = if (bmp != null) Icon.createWithBitmap(roundedIcon(bmp))
+                           else Icon.createWithResource(this, R.drawable.ic_launcher)
+                val launch = Intent(this, GameActivity::class.java)
+                    .setAction(Intent.ACTION_VIEW)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    .putExtra("app", path).putExtra("name", name)
+                val info = ShortcutInfo.Builder(this, shortcutId(path))
+                    .setShortLabel(name.take(25)).setLongLabel(name)
+                    .setIcon(icon).setIntent(launch).build()
+                try {
+                    if (sm.pinnedShortcuts.any { it.id == info.id }) {
+                        sm.enableShortcuts(listOf(info.id))
+                        sm.updateShortcuts(listOf(info))
+                        toast("$name is already on your home screen.")
+                    } else sm.requestPinShortcut(info, null)
+                } catch (e: Exception) {
+                    toast("Couldn't add $name to the home screen: ${e.message}")
+                }
+            }
+        }.start()
+    }
+
+    /** The icon with rounded corners, as on the phone, on a square the launcher shows whole. */
+    private fun roundedIcon(src: Bitmap): Bitmap {
+        val size = 192
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val r = RectF(0f, 0f, size.toFloat(), size.toFloat())
+        c.drawRoundRect(r, size * 0.18f, size * 0.18f, p)
+        p.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        c.drawBitmap(src, null, r, p)
+        return out
     }
 
     private fun pick(req: Int) {
