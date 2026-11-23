@@ -148,6 +148,8 @@ class Kernel:
                 return None
             if imm == INDEXED_THUMB:
                 n = struct.unpack('<I', self.emu.read(pc + 2, 4))[0]
+                if n >= len(self.emu.stubs.funcs):
+                    print(f'[kernel] svc at {self.emu.syms.name(pc - 2)} lr={self.emu.syms.name(self.uc.reg_read(14))} names stub {n}, which does not exist')
                 return self.emu.stubs.funcs[n]
             return getattr(self.emu.hle, __import__('hle').FUNCS[imm - THUMB_BASE].split('$')[0])
         imm = struct.unpack('<I', self.emu.read(pc - 4, 4))[0] & 0xffffff

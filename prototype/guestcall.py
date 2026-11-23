@@ -139,7 +139,10 @@ class InlineCalls:
         lr = self.uc.reg_read(UC_ARM_REG_LR)
         sp0 = self.uc.reg_read(UC_ARM_REG_SP)
         sp = (sp0 - 512) & ~7
-        self.sessions[t.tid] = (gen, lr, sp0, sp)
+        # a stack per thread: a call made here can reach another replaced function that makes
+        # calls of its own (a view controller's dealloc releasing the player it owns); the inner
+        # one finishes before the outer resumes
+        self.sessions.setdefault(t.tid, []).append((gen, lr, sp0, sp))
         set_call(self.emu, call, sp, self.tramp + 4)
         # the stub's own "bx lr" now goes to the trampoline, which calls r12
         self.uc.reg_write(UC_ARM_REG_LR, self.tramp)
@@ -155,12 +158,14 @@ class InlineCalls:
 
     def returned(self):
         t = self.emu.sched.cur
-        gen, lr, sp0, sp = self.sessions[t.tid]
+        gen, lr, sp0, sp = self.sessions[t.tid][-1]
         r = (self.uc.reg_read(UC_ARM_REG_R0), self.uc.reg_read(UC_ARM_REG_R1))
         try:
             call = gen.send(r)
         except StopIteration as e:
-            del self.sessions[t.tid]
+            self.sessions[t.tid].pop()
+            if not self.sessions[t.tid]:
+                del self.sessions[t.tid]
             self.set_result(e.value)
             self.uc.reg_write(UC_ARM_REG_SP, sp0)
             self.uc.reg_write(UC_ARM_REG_R12, lr)       # "b T; blx r12" returns to the caller

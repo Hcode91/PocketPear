@@ -65,9 +65,29 @@ METHODS = {
     'setInitialPlaybackTime:': 'm_ignore', 'setEndPlaybackTime:': 'm_ignore',
     'initialPlaybackTime': 'm_zero_double', 'endPlaybackTime': 'm_minus_one_double',
     'setAllowsAirPlay:': 'm_ignore', 'allowsAirPlay': 'm_zero', 'isAirPlayVideoActive': 'm_zero',
+    # anything else (setUseApplicationAudioSession:, setMovieControlMode:, ...) the real
+    # controller forwards to a private object ours does not have: it is answered with nil
+    'methodSignatureForSelector:': 'm_signature', 'forwardInvocation:': 'm_forward',
     'movieMediaTypes': 'm_zero', 'skipToBeginning': 'm_skip_to_beginning',
     'beginSeekingForward': 'm_ignore', 'beginSeekingBackward': 'm_ignore', 'endSeeking': 'm_ignore',
     'dealloc': 'm_dealloc',
+}
+
+# MPMoviePlayerViewController: its own methods reach into MPMoviePlayerController's private
+# objects (_videoViewController), which the replaced controller does not have, so it is
+# replaced too: it owns one of ours and shows its view, and plays when it appears.
+VC_METHODS = {
+    'init': 'vc_init', 'initWithContentURL:': 'vc_init_url', 'moviePlayer': 'vc_player',
+    'loadView': 'vc_load_view', 'viewWillAppear:': 'vc_appear', 'viewDidAppear:': 'vc_appear',
+    'viewWillDisappear:': 'vc_nothing', 'viewDidDisappear:': 'vc_nothing',
+    'shouldAutorotateToInterfaceOrientation:': 'vc_yes', 'canBecomeFirstResponder': 'vc_yes',
+    'willAnimateRotationToInterfaceOrientation:duration:': 'vc_nothing',
+    'didRotateFromInterfaceOrientation:': 'vc_nothing', 'remoteControlReceivedWithEvent:': 'vc_nothing',
+    '_restoreStatusBarAnimated:': 'vc_nothing', '_canReloadView': 'vc_no',
+    '_shouldUseFullScreenLayoutInWindow:parentViewController:': 'vc_yes',
+    '_moviePlayerViewController_playbackDidFinishNotification:': 'vc_nothing',
+    '_moviePlayerViewController_applicationDidEnterBackgroundNotification:': 'vc_nothing',
+    'dealloc': 'vc_dealloc',
 }
 
 
@@ -101,6 +121,20 @@ class Movies:
             made += 1
         if not made:
             return
+        self.view_controllers = {}   # MPMoviePlayerViewController -> its MPMoviePlayerController
+        vc = 0
+        import bisect
+        starts = sorted(set(self.emu.syms.addrs))
+        for sel, attr in VC_METHODS.items():
+            a = names.get(f'-[MPMoviePlayerViewController {sel}] (MediaPlayer)')
+            i = bisect.bisect_right(starts, a) if a is not None else 0
+            if a is not None and i < len(starts) and starts[i] - a < 8:
+                continue        # too short to hold a stub (one that only returns YES, say): kept
+            if a is not None:
+                stubs.replace(a, getattr(self, attr), a in self.emu.syms.thumb)
+                vc += 1
+        if vc:
+            print(f'[movie] MPMoviePlayerViewController: {vc} methods replaced')
         self.calls = InlineCalls(self.emu, stubs)
         self.fn = {n.split(' (')[0]: a for n, a in names.items() if n.startswith('_') and ' (' in n}
         print(f'[movie] MPMoviePlayerController: {made} methods replaced; movies play on the host')
@@ -399,6 +433,34 @@ class Movies:
     def m_ignore(self):
         self.ret(0)
 
+    def m_signature(self):
+        sel = self.arg(2)
+        if not hasattr(self, '_unknown'):
+            self._unknown = set()
+        if sel not in self._unknown:
+            self._unknown.add(sel)
+            try:
+                name = self.emu.cstr(sel)
+            except Exception:
+                name = hex(sel)
+            print(f'[movie] MPMoviePlayerController {name} is not implemented; it answers nil')
+
+        def g():
+            if not getattr(self, '_any_sig', 0):
+                cls = yield from self.cls('NSMethodSignature')
+                sig = yield from self.send(cls, 'signatureWithObjCTypes:', self.cstring('@@:'))
+                yield from self.send(sig, 'retain')
+                self._any_sig = sig
+            return self._any_sig
+        self.calls.run(g())
+
+    def m_forward(self):
+        # the invocation's return value is left nil
+        self.ret(0)
+
+    def m_one(self):
+        self.ret(1)
+
     def m_zero(self):
         self.ret(0)
 
@@ -414,6 +476,7 @@ class Movies:
         if p is None:
             self.ret(0)
             return
+        print(f'[movie] player {p.id} released')
         self.host_stop(p)
         self.posts = [x for x in self.posts if x[0] is not p]
 
@@ -430,6 +493,78 @@ class Movies:
             self._strpos += 8
             self.emu.write(sup, struct.pack('<II', obj, nsobject))
             yield (self.fn['_objc_msgSendSuper'], [sup, s])
+        self.calls.run(g())
+
+    # ------------------------------------------------------------ MPMoviePlayerViewController
+    def super_send(self, obj, cls_name, selname, *args):
+        """[super selname] for obj, whose superclass is cls_name's."""
+        if not getattr(self, '_super_struct', 0):
+            self._super_struct = self.cstring('12345678')
+        cls = yield from self.cls(cls_name)
+        s = yield from self.sel(selname)
+        self.emu.write(self._super_struct, struct.pack('<II', obj, cls))
+        r = yield (self.fn['_objc_msgSendSuper2'], [self._super_struct, s, *args])
+        return r[0]
+
+    def vc_setup(self, me, url):
+        me = yield from self.super_send(me, 'MPMoviePlayerViewController', 'init')
+        if not me:
+            return 0
+        cls = yield from self.cls('MPMoviePlayerController')
+        player = yield from self.send(cls, 'alloc')
+        # the replaced -init / -initWithContentURL:, run here rather than sent: an inline call
+        # cannot make inline calls of its own
+        player = yield from self.setup(player, url)
+        self.view_controllers[me] = player
+        return me
+
+    def vc_init(self):
+        self.calls.run(self.vc_setup(self.arg(0), 0))
+
+    def vc_init_url(self):
+        self.calls.run(self.vc_setup(self.arg(0), self.arg(2)))
+
+    def vc_player(self):
+        self.ret(self.view_controllers.get(self.arg(0), 0))
+
+    def vc_load_view(self):
+        me = self.arg(0)
+        player = self.view_controllers.get(me)
+        p = self.players.get(player)
+
+        def g():
+            if p is not None and p.view:
+                yield from self.send(me, 'setView:', p.view)
+        self.calls.run(g())
+
+    def vc_appear(self):
+        p = self.players.get(self.view_controllers.get(self.arg(0)))
+        if p is not None and p.autoplay and p.state != PLAYING:
+            self.start(p)
+        self.ret(0)
+
+    def vc_nothing(self):
+        self.ret(0)
+
+    def vc_yes(self):
+        self.ret(1)
+
+    def vc_no(self):
+        self.ret(0)
+
+    def vc_dealloc(self):
+        me = self.arg(0)
+        player = self.view_controllers.pop(me, 0)
+        print(f'[movie] view controller {me:#x} released')
+
+        def g():
+            if player:
+                p = self.players.get(player)
+                if p is not None and p.state != STOPPED:
+                    self.host_stop(p)
+                    p.state = STOPPED
+                yield from self.send(player, 'release')
+            yield from self.super_send(me, 'MPMoviePlayerViewController', 'dealloc')
         self.calls.run(g())
 
     # ------------------------------------------------------------ host events and notifications
@@ -475,8 +610,15 @@ class Movies:
         self.tick()
         if not self.posts:
             return None
-        p, name, reason = self.posts.pop(0)
-        return self.post_job(p, name, reason)
+        # everything queued goes out in one go, as one player event's notifications did on the
+        # phone: a game that frees its observer when the first arrives (Splinter Cell's game
+        # thread, a frame later) must not find the second still waiting for the next delivery
+        posts, self.posts = self.posts, []
+
+        def all_of():
+            for p, name, reason in posts:
+                yield from self.post_job(p, name, reason)
+        return all_of()
 
     def post_job(self, p, name, reason):
         var = self.names.get(f'_{name} (MediaPlayer)')
@@ -494,7 +636,13 @@ class Movies:
             num = yield from self.send(num_cls, 'numberWithInt:', reason)
             dict_cls = yield from self.cls('NSDictionary')
             info = yield from self.send(dict_cls, 'dictionaryWithObject:forKey:', num, key)
-        yield from self.send(center, 'postNotificationName:object:userInfo:', nsname, p.obj, info)
+        # another thread may have released the player while this was being built (Splinter Cell
+        # stops and frees its movie from its game thread on the state change); a released
+        # player posts nothing, and its observers may be gone with it
+        if self.players.get(p.obj) is p:
+            yield from self.send(center, 'postNotificationName:object:userInfo:', nsname, p.obj, info)
+        else:
+            print(f'[movie] player {p.id} was released; {name} not posted')
         yield (self.fn['_objc_autoreleasePoolPop'], [pool])
 
     def next_due(self):
