@@ -204,6 +204,41 @@ def list_apps(files_dir):
     return json.dumps(out)
 
 
+def _norm(t):
+    return ''.join(c for c in str(t).lower() if c.isalnum())
+
+
+def find_app(files_dir, query):
+    """The installed game a name or bundle ID means, as JSON {name, path}; '' if none.
+    An exact match (ignoring case, spaces and punctuation) on the shown name, the bundle's
+    name, its ID or its folder wins; then a name that contains the other."""
+    q = _norm(query)
+    if not q:
+        return ''
+    d = os.path.join(files_dir, 'apps')
+    games = []
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not name.endswith('.app'):
+            continue
+        path = os.path.join(d, name)
+        try:
+            info = plistlib.load(open(os.path.join(path, 'Info.plist'), 'rb'))
+        except Exception:
+            info = {}
+        keys = [_display_name(path), info.get('CFBundleName'), info.get('CFBundleDisplayName'),
+                info.get('CFBundleIdentifier'), name[:-4]]
+        games.append((_display_name(path), path, [_norm(k) for k in keys if k]))
+    for shown, path, keys in games:
+        if q in keys:
+            return json.dumps({'name': shown, 'path': path})
+    near = [(min(abs(len(k) - len(q)) for k in keys if k and (q in k or k in q)), shown, path)
+            for shown, path, keys in games if any(k and len(k) >= 3 and (q in k or k in q) for k in keys)]
+    if near:
+        _, shown, path = min(near)
+        return json.dumps({'name': shown, 'path': path})
+    return ''
+
+
 def app_icon(files_dir, app_path):
     """Path of a PNG of the game's home screen icon, read from its own bundle; '' if none."""
     try:

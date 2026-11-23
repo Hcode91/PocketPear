@@ -95,6 +95,34 @@ class MainActivity : Activity() {
         root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         refresh()
+        launchRequested(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        launchRequested(intent)
+    }
+
+    /** Another app (BacklogQuest) asking for one game by name or bundle ID: start it. */
+    private fun launchRequested(i: Intent?) {
+        if (i?.action != POCKET_LAUNCH) return
+        val want = i.getStringExtra("game_id")?.trim().orEmpty()
+        i.action = null                                      // not again on a rotation
+        if (want.isEmpty()) return
+        if (!py.callAttr("firmware_ready", filesDir.absolutePath).toBoolean()) {
+            toast("Import the firmware first."); return
+        }
+        val found = py.callAttr("find_app", filesDir.absolutePath, want).toString()
+        if (found.isEmpty()) {
+            toast("No game called \"$want\" in PocketPear. Import it, or check the name in BacklogQuest matches the one in this list.")
+            return
+        }
+        val a = org.json.JSONObject(found)
+        val path = a.getString("path")
+        startActivity(Intent(this, GameActivity::class.java)
+            .putExtra("app", path).putExtra("name", a.getString("name"))
+            .putExtra("realtime", realtime(path)))
     }
 
     private fun prefs() = getSharedPreferences("games", MODE_PRIVATE)
@@ -319,6 +347,9 @@ class MainActivity : Activity() {
     companion object {
         const val REQ_FIRMWARE = 1
         const val REQ_IPA = 2
+
+        /** What BacklogQuest (and other launchers) send, with the game's name or bundle ID in "game_id". */
+        const val POCKET_LAUNCH = "com.hcode91.pocket.LAUNCH_GAME"
 
         fun pocketpear(a: Activity): PyObject {
             if (!Python.isStarted()) Python.start(AndroidPlatform(a))
