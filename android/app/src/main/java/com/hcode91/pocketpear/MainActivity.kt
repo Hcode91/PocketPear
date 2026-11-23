@@ -16,6 +16,10 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
+import android.graphics.BitmapFactory
+import android.graphics.Outline
+import android.view.ViewOutlineProvider
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -131,12 +135,34 @@ class MainActivity : Activity() {
             val a = apps.getJSONObject(i)
             val name = a.getString("name")
             val path = a.getString("path")
-            list.addView(TextView(this).apply {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+            }
+            // the game's own icon, rounded like on the home screen; loaded off the UI thread,
+            // since a crushed PNG is rewritten the first time
+            val icon = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(Color.DKGRAY)
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, v.width * 0.18f)
+                }
+                clipToOutline = true
+            }
+            row.addView(icon, LinearLayout.LayoutParams(dp(56), dp(56)))
+            Thread {
+                val file = try { py.callAttr("app_icon", filesDir.absolutePath, path).toString() } catch (e: Exception) { "" }
+                val bmp = if (file.isNotEmpty()) BitmapFactory.decodeFile(file) else null
+                if (bmp != null) ui.post { icon.setImageBitmap(bmp); icon.setBackgroundColor(Color.TRANSPARENT) }
+            }.start()
+            row.addView(TextView(this).apply {
                 text = name
                 textSize = 20f
                 setTextColor(Color.WHITE)
-                setPadding(dp(8), dp(14), dp(8), dp(14))
-                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), 0, 0, 0)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            list.addView(row.apply {
                 setOnClickListener {
                     if (!ready) { toast("Import the firmware first."); return@setOnClickListener }
                     startActivity(Intent(this@MainActivity, GameActivity::class.java)

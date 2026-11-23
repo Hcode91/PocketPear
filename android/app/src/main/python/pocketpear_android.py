@@ -204,6 +204,16 @@ def list_apps(files_dir):
     return json.dumps(out)
 
 
+def app_icon(files_dir, app_path):
+    """Path of a PNG of the game's home screen icon, read from its own bundle; '' if none."""
+    try:
+        import appicon
+        return appicon.icon_png(app_path, os.path.join(files_dir, 'cache', 'icons')) or ''
+    except Exception as e:
+        print(f'[icon] {os.path.basename(app_path)}: {e}')
+        return ''
+
+
 def remove_app(path):
     shutil.rmtree(path, ignore_errors=True)
 
