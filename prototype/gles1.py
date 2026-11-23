@@ -363,9 +363,30 @@ class ES1:
     def glSampleCoveragex(self): host('glSampleCoverage', 'fb')(self.x(0), self.a(1) & 0xff)
 
     # ------------------------------------------------------------------ texture environment
+    # What GL accepts for each enum-valued parameter; anything else is GL_INVALID_ENUM and the
+    # state stays as it was. Splinter Cell resets its combiner by setting every source and
+    # operand to 0, which a phone ignores: taking the 0 drew its menu text as white boxes.
+    ENV_MODES = {0x2100, 0x2101, 0x0BE2, 0x0104, 0x1E01, 0x8570}          # MODULATE DECAL BLEND ADD REPLACE COMBINE
+    COMBINE_RGB_MODES = {0x1E01, 0x2100, 0x0104, 0x8574, 0x8575, 0x84E7, 0x86AE, 0x86AF}
+    COMBINE_ALPHA_MODES = {0x1E01, 0x2100, 0x0104, 0x8574, 0x8575, 0x84E7}
+    SOURCES = {SRC_TEXTURE, SRC_CONSTANT, SRC_PRIMARY, SRC_PREVIOUS}
+    RGB_OPS = {OP_COLOR, OP_ONE_MINUS_COLOR, OP_ALPHA, OP_ONE_MINUS_ALPHA}
+    ALPHA_OPS = {OP_ALPHA, OP_ONE_MINUS_ALPHA}
+
     def tex_env(self, target, pname, values):
         u = self.units[self.unit]
         v0 = values[0]
+        valid = {ENV_MODE: self.ENV_MODES, COMBINE_RGB: self.COMBINE_RGB_MODES,
+                 COMBINE_ALPHA: self.COMBINE_ALPHA_MODES}.get(pname)
+        if valid is None:
+            if 0x8580 <= pname <= 0x8582 or 0x8588 <= pname <= 0x858A:
+                valid = self.SOURCES
+            elif 0x8590 <= pname <= 0x8592:
+                valid = self.RGB_OPS
+            elif 0x8598 <= pname <= 0x859A:
+                valid = self.ALPHA_OPS
+        if valid is not None and target != POINT_SPRITE and int(v0) not in valid:
+            return
         if target == POINT_SPRITE:
             if pname == COORD_REPLACE:
                 u.coord_replace = bool(v0)

@@ -6,6 +6,7 @@ its exported gl* functions and the EAGLContext methods are replaced (hle.Stubs) 
 that call the host. Object names (textures, buffers...) are the host's. iOS passes float
 arguments in core registers (softfp), so every argument starts as a 32-bit word.
 """
+import collections
 import ctypes
 import os
 import struct
@@ -482,6 +483,7 @@ class GLES:
         if self.frame_sink is not None and not save and self.same_as_last(ui):
             self.draws = self.client_draws = 0
             self.ret(1)
+            self.vsync()
             return
         if self.frame_sink is not None or save:
             rgba = self.read_frame()
@@ -493,6 +495,33 @@ class GLES:
                 self.save_frame(rgba)
         self.draws = self.client_draws = 0
         self.ret(1)
+        self.vsync()
+
+    def vsync(self):
+        """A device shows at most sixty frames a second, and presenting faster makes the app
+        wait. A game whose loop has no frame limiter of its own (Splinter Cell) otherwise
+        presents a thousand frames for each second of game time, each one a readback on the
+        phone. Only an app presenting well over sixty frames a second of game time is held back:
+        the emulator runs the game's threads one after another, so holding a game that already
+        presents about sixty (Bioshock) only loses time. PP_NO_VSYNC=1 turns it off."""
+        if os.environ.get('PP_NO_VSYNC'):
+            return
+        from sched import CLOCK
+        now = CLOCK.now()
+        recent = self.__dict__.setdefault('_presents', collections.deque())
+        recent.append(now)
+        while recent and recent[0] < now - 1.0:
+            recent.popleft()
+        # on above 90 a second, off again only below 45, or holding it to 60 would switch it off
+        n = len(recent)
+        self.vsync_on = n > 90 or (getattr(self, 'vsync_on', False) and n >= 45)
+        if not self.vsync_on:
+            self.next_vsync = now
+            return
+        due = max(getattr(self, 'next_vsync', now), now - 1 / 60)
+        self.next_vsync = max(due, now) + 1 / 60
+        if due > now and self.emu.sched.cur is not None:
+            self.emu.sched.block('vsync', lambda: False, lambda timed_out: None, due - now)
 
     def same_as_last(self, ui):
         """Whether this frame would show exactly what the last one did, so it need not be read
