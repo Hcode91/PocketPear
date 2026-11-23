@@ -204,7 +204,7 @@ class GameActivity : Activity() {
     private fun attachSurface(mp: MediaPlayer) {
         fun begin(t: SurfaceTexture) {
             if (player !== mp) return
-            note("[movie] host player $id has its surface (${movieView.width}x${movieView.height})")
+            note("[movie] host player $playerId has its surface (${movieView.width}x${movieView.height})")
             val surface = Surface(t)
             movieSurface = surface
             mp.setSurface(surface)

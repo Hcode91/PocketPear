@@ -198,6 +198,17 @@ class Emulator:
             return self.container + guest[len(CONTAINER):]
         if guest in DEVICES:
             return DEVICES[guest]()
+        # The root file system's links never change, so a resolved path is kept: games stat
+        # and open the same few system paths many times a second.
+        cache = self.__dict__.setdefault('_root_paths', {})
+        host = cache.get(guest)
+        if host is None:
+            host = self._resolve_root(guest)
+            if len(cache) < 50000:
+                cache[guest] = host
+        return host
+
+    def _resolve_root(self, guest):
         p = guest
         for _ in range(16):   # resolve absolute symlinks inside the root ourselves
             host = self.rootfs + p
@@ -291,6 +302,10 @@ class Emulator:
         self.ios7 = Ios7(self)
         if not os.environ.get('PP_NO_IOS7'):
             self.ios7.install(self.stubs)
+        from fixedanswers import FixedAnswers
+        self.fixed_answers = FixedAnswers(self)
+        if not os.environ.get('PP_NO_FIXED_ANSWERS'):
+            self.fixed_answers.install(self.stubs)
         from imports import MissingImports
         self.missing_imports = MissingImports(self)
         self.missing_imports.install(exe, system_defined)
@@ -539,6 +554,7 @@ class Emulator:
         import collections
         guest_samples = collections.Counter() if os.environ.get('PP_GUEST_SAMPLE') else None
         self.quit = False
+        set_tid = getattr(self.uc, 'set_tid', lambda tid: None)
         while self.kernel.exited is None and not self.quit:
             self.displaylinks.deliver()
             self.ui.deliver()
@@ -552,6 +568,7 @@ class Emulator:
                     print('     ', th)
                 break
             self.sched.cur = t
+            set_tid(t.tid)
             self.sched.wake_state(t, state)
             if t.ready is not None or t.dead:      # its completion blocked it again
                 t.ctx = self.uc.context_save()
@@ -602,6 +619,10 @@ class Emulator:
                     for (tid, fn), c in by.most_common(15):
                         print(f'    {c * 100 / n:5.1f}%  thread {tid}  {fn}')
                     guest_samples.clear()
+                if self.kernel.call_counts:
+                    print('[emu] calls since the last heartbeat: ' + ', '.join(
+                        f'{n} {c}' for n, c in self.kernel.call_counts.most_common(25)))
+                    self.kernel.call_counts.clear()
                 print(f'[emu] heartbeat: guest time {CLOCK.now():.2f}s, {self.kernel.calls} calls'
                       + (f', {g.frame} frames presented, {g.draws} draws since the last' if g is not None else ''))
                 # A game that has gone quiet (its clock runs on, but it makes few calls) is

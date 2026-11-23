@@ -96,6 +96,9 @@ class Kernel:
         self.thread_port = self.new_port('thread')
         self.host_port = self.new_port('host')
         self.calls = 0
+        # PP_SYS_COUNT=1: count system calls and HLE functions, shown with each heartbeat.
+        import collections
+        self.call_counts = collections.Counter() if os.environ.get('PP_SYS_COUNT') else None
         self.semaphores = {}
         import kqueue
         kqueue.install(Kernel)
@@ -170,6 +173,8 @@ class Kernel:
             target = self.svc_target(pc, thumb)
             self.svc_targets[key] = target
         if target is not None:
+            if self.call_counts is not None:
+                self.call_counts[getattr(target, '__name__', str(target))] += 1
             try:
                 target()
             except Exception:
@@ -186,6 +191,8 @@ class Kernel:
         if num & 0x80000000:
             num -= 1 << 32
         self.calls += 1
+        if self.call_counts is not None:
+            self.call_counts[BSD_NAMES.get(num, num) if num > 0 else MACH_NAMES.get(-num, num)] += 1
         if self.calls == TRACE_FROM:
             self.emu.trace_sys = True
         if self.calls % 512 == 0 and len(self.emu.sched.threads) > 1 and self.emu.sched.cur.ready is None:

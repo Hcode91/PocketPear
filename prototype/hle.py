@@ -53,6 +53,34 @@ class Mutex:
         self.count = 0
 
 
+class NativeMutex:
+    """A mutex whose state lives in the CPU core, which answers uncontended locks and unlocks
+    without coming back to Python. Thread ids are stored + 1 (0 is free)."""
+    __slots__ = ('uc', 'addr')
+
+    def __init__(self, uc, addr):
+        self.uc, self.addr = uc, addr
+
+    @property
+    def owner(self):
+        o = self.uc.mutex_get(self.addr)[0]
+        return None if o == 0 else o - 1
+
+    @owner.setter
+    def owner(self, tid):
+        self.uc.mutex_set(self.addr, 0 if tid is None else tid + 1, self.count if tid is not None else 0)
+
+    @property
+    def count(self):
+        return self.uc.mutex_get(self.addr)[1]
+
+    @count.setter
+    def count(self, n):
+        o = self.uc.mutex_get(self.addr)[0]
+        if o:
+            self.uc.mutex_set(self.addr, o, n)
+
+
 class Cond:
     def __init__(self):
         self.waiters = []          # threads waiting, in order
@@ -87,6 +115,9 @@ class Pthreads:
                 self.emu.write(a, struct.pack('<II', 0xEF000000 | (SVC_BASE + i), 0xE12FFF1E))
             n += 1
         print(f'[hle] {n} pthread functions replaced')
+        if getattr(self.uc, 'native_mutexes', False):
+            ids = {f: (THUMB_BASE + i, SVC_BASE + i) for i, f in enumerate(FUNCS)}
+            self.uc.mutex_svcs(ids['pthread_mutex_lock'], ids['pthread_mutex_trylock'], ids['pthread_mutex_unlock'])
 
     # ------------------------------------------------------------ plumbing
     def args(self, n):
@@ -106,7 +137,7 @@ class Pthreads:
     def mutex(self, a):
         m = self.mutexes.get(a)
         if m is None:
-            m = self.mutexes[a] = Mutex()
+            m = self.mutexes[a] = NativeMutex(self.uc, a) if getattr(self.uc, 'native_mutexes', False) else Mutex()
         return m
 
     def mutex_type(self, a):

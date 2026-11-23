@@ -234,8 +234,51 @@ class GLES:
                     if self.context_switches == 1:
                         print(f'[gles] guest threads draw on different contexts; the host context follows the thread')
                 self.host_tid = tid
+                self.sync_native()
             impl()
         return call
+
+    def sync_native(self):
+        """Tell the CPU core which guest thread may run GL calls itself (natively_run): the one
+        whose context is current on the host, while that context is OpenGL ES 2."""
+        uc = self.emu.uc
+        if not getattr(uc, 'native_gl', False):
+            return
+        v = self.host_tid if self.host_tid is not None and self.api == 2 else 0xffffffff
+        if v != getattr(self, '_native_tid', None):
+            self._native_tid = v
+            uc.gl_tid(v)
+
+    def natively_run(self, n, base):
+        """Let the CPU core run stub n (GL function base) without coming back to Python: GL calls
+        that only pass their arguments to the host's function, which the renderer makes tens of
+        thousands of times a second. PP_SLOW_GL=1 keeps them all in Python."""
+        uc = self.emu.uc
+        if not getattr(uc, 'native_gl', False) or os.environ.get('PP_SLOW_GL'):
+            return False
+        if base == 'glBindTexture' and hasattr(uc, 'tex_target'):
+            # the texture's target is kept by the core for retire_textures; the warning about a
+            # deleted name bound again is only given when this runs in Python
+            uc.gl_fn(n, ctypes.cast(_gl.glBindTexture, ctypes.c_void_p).value, 4, 'uu', 'v', 0)
+            return True
+        if base in SCALAR and base not in TRACKED:
+            spec = SCALAR[base]
+            fn = host(spec[2] if len(spec) > 2 else base, spec[0], spec[1])
+            if fn is None or len(spec[0]) > 11 or spec[0].count('f') > 8 or len(spec[0]) - spec[0].count('f') > 6:
+                return False
+            uc.gl_fn(n, ctypes.cast(fn, ctypes.c_void_p).value, 1, spec[0], spec[1], 0)
+            return True
+        import re
+        m = re.fullmatch(r'glUniform([1-4])([fi])v', base) or re.fullmatch(r'glUniformMatrix([2-4])(f)v', base)
+        if m:
+            fn = getattr(_gl, base, None)
+            if fn is None:
+                return False
+            k = int(m.group(1))
+            matrix = 'Matrix' in base
+            uc.gl_fn(n, ctypes.cast(fn, ctypes.c_void_p).value, 3 if matrix else 2, '', 'v', k * k if matrix else k)
+            return True
+        return False
 
     def make_current(self, guest_ctx):
         if guest_ctx != self.host_guest:
@@ -248,12 +291,14 @@ class GLES:
         surf = ctypes.c_void_p(self.surface) if self.surface and ctx else None
         _egl.eglMakeCurrent(ctypes.c_void_p(self.display), surf, surf, ctypes.c_void_p(ctx) if ctx else None)
         self.api = self.contexts.get(guest_ctx, (None, 2))[1] if guest_ctx else self.api
+        self.sync_native()
 
     # ------------------------------------------------------------------------ install
     def install(self, stubs, syms):
         """syms: name -> address for OpenGLES.framework; thumb: set of Thumb addresses."""
         ES1_NAMES.update(_es1_names())
-        made = 0
+        made = native = 0
+        plain = not os.environ.get('GL_ERRORS') and not os.environ.get('PP_GL_FIRST')
         for name, addr in syms.items():
             impl = None
             base = name[1:] if name.startswith('_') else name
@@ -281,9 +326,15 @@ class GLES:
                 impl = self.first_call(base, impl)
             if impl is not None:
                 impl = self.on_own_context(impl)
-                stubs.replace(addr, impl, addr in self.emu.syms.thumb)
+                impl.__name__ = base
+                n = stubs.replace(addr, impl, addr in self.emu.syms.thumb)
                 made += 1
-        print(f'[gles] {made} OpenGL ES entry points replaced')
+                if plain and self.natively_run(n, base):
+                    native += 1
+        print(f'[gles] {made} OpenGL ES entry points replaced' + (f', {native} run by the CPU core' if native else ''))
+        if native:
+            from hle import INDEXED_THUMB, INDEXED_ARM
+            self.emu.uc.gl_indexed(INDEXED_THUMB, INDEXED_ARM)
 
     def first_call(self, name, impl):
         """PP_GL_FIRST=1: say when each GL entry point is first called, and how often since."""
@@ -548,7 +599,11 @@ class GLES:
         for name in names:
             if not name or name in self.retired:
                 continue
-            target = self.texture_targets.pop(name, 0x0DE1)
+            target = self.texture_targets.pop(name, 0)
+            native = getattr(self.emu.uc, 'tex_target', None)
+            if native is not None:
+                target = native(name) or target
+            target = target or 0x0DE1
             binding = 0x8514 if target == 0x8513 else 0x8069       # TEXTURE_BINDING_CUBE_MAP / _2D
             prev = self.bound(binding)
             _gl.glBindTexture(target, name)

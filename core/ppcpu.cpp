@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
@@ -93,6 +94,114 @@ struct CPU final : Dynarmic::A32::UserCallbacks {
     std::unique_ptr<Dynarmic::A32::Jit> jit;
     std::unordered_set<u32> hooks;
     bool bypass_hooks = false;
+
+    // pthread mutexes, which the Python side replaces with svcs. Games lock and unlock tens of
+    // thousands of times a second and almost never wait, so the uncontended cases are answered
+    // here without leaving the JIT; anything else (a wait, a relock, an error) halts to Python,
+    // which reads and writes the same table. owner is the thread id + 1, 0 when free.
+    struct Mutex { u32 owner = 0, count = 0; };
+    std::unordered_map<u32, Mutex> mutexes;
+    u32 cur_tid = 0;
+    u32 svc_lock[2] = {~0u, ~0u}, svc_trylock[2] = {~0u, ~0u}, svc_unlock[2] = {~0u, ~0u};
+    u64 fast_calls = 0;
+
+    // OpenGL ES calls that need nothing from the Python side but a straight call to the host's
+    // GL (the "scalar" ones, and uniforms from a guest array), registered by the svc stub index
+    // Python gave them. They are run here only on the thread whose context is current on the
+    // host (gl_tid); anything else goes to Python, which switches contexts first.
+    struct GlFn {
+        void* fn = nullptr;
+        int kind = 0;           // 1 scalar, 4 glBindTexture (a scalar that also notes non-2D targets), 2 uniform vector (loc, count, ptr), 3 uniform matrix (loc, count, transpose, ptr)
+        char spec[12] = {};     // scalar argument kinds: u i f b
+        char ret = 'v';         // v u b
+        int comps = 0;          // floats or ints per element (kinds 2 and 3)
+    };
+    std::vector<GlFn> glfns;
+    std::unordered_map<u32, u32> tex_targets;     // texture name -> target, for targets other than TEXTURE_2D
+    u32 gl_tid = ~0u;
+    u32 svc_indexed_thumb = ~0u, svc_indexed_arm = ~0u;
+
+    u32 arg(int i) {
+        auto& r = jit->Regs();
+        return i < 4 ? r[i] : load<u32>(r[13] + 4 * (i - 4));
+    }
+
+    bool fast_gl(u32 swi) {
+        auto& r = jit->Regs();
+        bool thumb = jit->Cpsr() & 0x20;
+        if (swi != (thumb ? svc_indexed_thumb : svc_indexed_arm) || cur_tid != gl_tid) return false;
+        u8* np = host(r[15] + (thumb ? 2 : 4));
+        if (!np) return false;
+        u32 n;
+        std::memcpy(&n, np, 4);
+        if (n >= glfns.size() || !glfns[n].fn) return false;
+        const GlFn& g = glfns[n];
+        if (g.kind == 4) {
+            u32 target = r[0], name = r[1];
+            if (name) {
+                if (target != 0x0DE1) tex_targets[name] = target;
+                else if (!tex_targets.empty()) tex_targets.erase(name);
+            }
+            reinterpret_cast<void (*)(u32, u32)>(g.fn)(target, name);
+        } else if (g.kind == 1) {
+            u64 iv[8] = {};
+            float fv[8] = {};
+            int ni = 0, nf = 0;
+            for (int i = 0; g.spec[i]; i++) {
+                u32 w = arg(i);
+                switch (g.spec[i]) {
+                case 'f': { float f; std::memcpy(&f, &w, 4); if (nf < 8) fv[nf++] = f; break; }
+                case 'b': if (ni < 8) iv[ni++] = w & 0xff; break;
+                case 'i': if (ni < 8) iv[ni++] = u64(s64(s32(w))); break;
+                default: if (ni < 8) iv[ni++] = w; break;
+                }
+            }
+            // integer and floating-point arguments are given registers separately (System V
+            // x86-64 and AAPCS64 alike), so one signature fits every mix of up to 6 + 8
+            using F = u64 (*)(u64, u64, u64, u64, u64, u64, u64, u64, float, float, float, float, float, float, float, float);
+            u64 v = reinterpret_cast<F>(g.fn)(iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], iv[6], iv[7],
+                                               fv[0], fv[1], fv[2], fv[3], fv[4], fv[5], fv[6], fv[7]);
+            if (g.ret == 'u') r[0] = u32(v);
+            else if (g.ret == 'b') r[0] = u32(v & 0xff);
+        } else {
+            bool matrix = g.kind == 3;
+            s32 loc = s32(r[0]);
+            s32 count = s32(r[1]);
+            u32 p = matrix ? r[3] : r[2];
+            u32 len = u32(count) * u32(g.comps) * 4;
+            if (count <= 0 || count > 4096) return false;
+            u8* a = host(p);
+            u8* b = host(p + len - 1);
+            if (!a || !b || b - a != std::ptrdiff_t(len - 1)) return false;
+            if (matrix) reinterpret_cast<void (*)(s32, s32, u8, const void*)>(g.fn)(loc, count, u8(r[2]), a);
+            else reinterpret_cast<void (*)(s32, s32, const void*)>(g.fn)(loc, count, a);
+        }
+        fast_calls++;
+        return true;
+    }
+
+    bool fast_svc(u32 swi) {
+        if (fast_gl(swi)) return true;
+        bool lock = swi == svc_lock[0] || swi == svc_lock[1];
+        bool trylock = swi == svc_trylock[0] || swi == svc_trylock[1];
+        bool unlock = swi == svc_unlock[0] || swi == svc_unlock[1];
+        if (!lock && !trylock && !unlock) return false;
+        auto& r = jit->Regs();
+        u32 me = cur_tid + 1;
+        if (unlock) {
+            auto it = mutexes.find(r[0]);
+            if (it == mutexes.end() || it->second.owner != me) return false;
+            if (--it->second.count == 0 || int(it->second.count) < 0) it->second = {};
+        } else {
+            Mutex& m = mutexes[r[0]];
+            if (m.owner != 0) return false;
+            m.owner = me;
+            m.count = 1;
+        }
+        r[0] = 0;
+        fast_calls++;
+        return true;
+    }
 
     u32 tpidruro = 0, tpidrurw = 0;
 
@@ -272,6 +381,7 @@ struct CPU final : Dynarmic::A32::UserCallbacks {
     }
 
     void CallSVC(u32 swi) override {
+        if (reason == STOPPED && !bypass_hooks && fast_svc(swi)) return;
         if (reason == STOPPED) {
             if (swi == HOOK_SWI) {
                 reason = HOOK;
@@ -541,6 +651,50 @@ EXPORT int ppcpu_step(void* c, u32* info0, u32* info1) {
     return r;
 }
 
+EXPORT void ppcpu_mutex_svcs(void* c, const u32* six) {
+    auto* p = static_cast<CPU*>(c);
+    for (int i = 0; i < 2; i++) {
+        p->svc_lock[i] = six[i];
+        p->svc_trylock[i] = six[2 + i];
+        p->svc_unlock[i] = six[4 + i];
+    }
+}
+EXPORT void ppcpu_gl_indexed(void* c, u32 thumb, u32 arm) {
+    static_cast<CPU*>(c)->svc_indexed_thumb = thumb;
+    static_cast<CPU*>(c)->svc_indexed_arm = arm;
+}
+EXPORT void ppcpu_gl_fn(void* c, u32 n, void* fn, int kind, const char* spec, int ret, int comps) {
+    auto& v = static_cast<CPU*>(c)->glfns;
+    if (n >= v.size()) v.resize(n + 1);
+    auto& g = v[n];
+    g.fn = fn;
+    g.kind = kind;
+    std::strncpy(g.spec, spec ? spec : "", sizeof g.spec - 1);
+    g.ret = char(ret);
+    g.comps = comps;
+}
+EXPORT u32 ppcpu_tex_target(void* c, u32 name) {
+    auto& m = static_cast<CPU*>(c)->tex_targets;
+    auto it = m.find(name);
+    if (it == m.end()) return 0;
+    u32 t = it->second;
+    m.erase(it);
+    return t;
+}
+EXPORT void ppcpu_gl_tid(void* c, u32 tid) { static_cast<CPU*>(c)->gl_tid = tid; }
+EXPORT void ppcpu_set_tid(void* c, u32 tid) { static_cast<CPU*>(c)->cur_tid = tid; }
+// owner (thread id + 1, 0 when free) and count of the mutex at addr
+EXPORT void ppcpu_mutex_get(void* c, u32 addr, u32* owner, u32* count) {
+    auto& m = static_cast<CPU*>(c)->mutexes;
+    auto it = m.find(addr);
+    *owner = it == m.end() ? 0 : it->second.owner;
+    *count = it == m.end() ? 0 : it->second.count;
+}
+EXPORT void ppcpu_mutex_set(void* c, u32 addr, u32 owner, u32 count) {
+    auto& m = static_cast<CPU*>(c)->mutexes;
+    if (owner) m[addr] = {owner, count}; else m.erase(addr);
+}
+EXPORT u64 ppcpu_fast_calls(void* c) { return static_cast<CPU*>(c)->fast_calls; }
 EXPORT void ppcpu_stop(void* c) { static_cast<CPU*>(c)->jit->HaltExecution(Dynarmic::HaltReason::UserDefined2); }
 
 }  // extern "C"

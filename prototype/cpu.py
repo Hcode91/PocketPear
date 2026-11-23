@@ -55,7 +55,16 @@ def lib():
             f.restype, f.argtypes = res, args
         # newer libraries: r0-r15 in place, and a PVRTC decoder (older ones lack them)
         for name, res, args in [('ppcpu_regs', pu32, [P]),
-                                ('ppcpu_pvrtc', None, [ctypes.c_char_p, U32, I, I, I, P])]:
+                                ('ppcpu_pvrtc', None, [ctypes.c_char_p, U32, I, I, I, P]),
+                                ('ppcpu_mutex_svcs', None, [P, P]),
+                                ('ppcpu_set_tid', None, [P, U32]),
+                                ('ppcpu_mutex_get', None, [P, U32, P, P]),
+                                ('ppcpu_mutex_set', None, [P, U32, U32, U32]),
+                                ('ppcpu_fast_calls', ctypes.c_uint64, [P]),
+                                ('ppcpu_gl_indexed', None, [P, U32, U32]),
+                                ('ppcpu_gl_fn', None, [P, U32, P, I, ctypes.c_char_p, I, I]),
+                                ('ppcpu_gl_tid', None, [P, U32]),
+                                ('ppcpu_tex_target', U32, [P, U32])]:
             f = getattr(L, name, None)
             if f is not None:
                 f.restype, f.argtypes = res, args
@@ -112,6 +121,37 @@ class DynUc:
         self.regs = None
         if hasattr(self.L, 'ppcpu_regs'):
             self.regs = (ctypes.c_uint32 * 16).from_address(ctypes.addressof(self.L.ppcpu_regs(self.h).contents))
+        # the core answers uncontended pthread mutex calls itself (hle.Pthreads); PP_SLOW_MUTEX=1 stops it
+        self.native_mutexes = hasattr(self.L, 'ppcpu_mutex_get') and not os.environ.get('PP_SLOW_MUTEX')
+        self._mo, self._mc = ctypes.c_uint32(), ctypes.c_uint32()
+        self.native_gl = hasattr(self.L, 'ppcpu_gl_fn')
+
+    def gl_indexed(self, thumb, arm):
+        self.L.ppcpu_gl_indexed(self.h, thumb, arm)
+
+    def gl_fn(self, n, fn, kind, spec, ret, comps):
+        self.L.ppcpu_gl_fn(self.h, n, fn, kind, spec.encode(), ord(ret), comps)
+
+    def tex_target(self, name):
+        return self.L.ppcpu_tex_target(self.h, name)
+
+    def gl_tid(self, tid):
+        self.L.ppcpu_gl_tid(self.h, tid)
+
+    def set_tid(self, tid):
+        if self.native_mutexes or self.native_gl:
+            self.L.ppcpu_set_tid(self.h, tid)
+
+    def mutex_svcs(self, lock, trylock, unlock):
+        """Each a (Thumb, ARM) pair of svc immediates."""
+        self.L.ppcpu_mutex_svcs(self.h, (ctypes.c_uint32 * 6)(*lock, *trylock, *unlock))
+
+    def mutex_get(self, addr):
+        self.L.ppcpu_mutex_get(self.h, addr, ctypes.byref(self._mo), ctypes.byref(self._mc))
+        return self._mo.value, self._mc.value
+
+    def mutex_set(self, addr, owner, count):
+        self.L.ppcpu_mutex_set(self.h, addr, owner, count)
 
     def _warn(self, what):
         if what not in self.warned:
