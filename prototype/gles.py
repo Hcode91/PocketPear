@@ -415,6 +415,11 @@ class GLES:
             self.share = ctx
         self.contexts[guest] = (ctx, api)
         print(f'[gles] EAGLContext {guest:#x} (OpenGL ES {api}.0) -> host context {ctx:#x}')
+        if guest == self.host_guest:
+            # the object is current already (an app that tried ES 2, released the context and
+            # got the same address back for ES 1): its API changes now, and with it which calls
+            # the CPU core may run itself
+            self.make_current(guest)
         self.ret(guest)
 
     def eagl_init_with_api_sharegroup(self):
@@ -443,12 +448,17 @@ class GLES:
     def display_turn(self):
         """How the host has to turn a frame to show it upright: 'cw', 'ccw' or None. Apps made
         before UIKit rotated GL views draw landscape games into a portrait renderbuffer, turned
-        for the way the phone is held (Info.plist's UIInterfaceOrientation)."""
+        for the way the phone is held: Info.plist's UIInterfaceOrientation or, when that says
+        nothing, the status bar orientation the app sets as it starts (Splinter Cell sets
+        UIInterfaceOrientationLandscapeRight in code)."""
         w, h = self.screen
-        o = str(self.emu.info.get('UIInterfaceOrientation', ''))
-        if w >= h or 'Landscape' not in o:
+        if w >= h:
             return None
-        return 'cw' if o.endswith('LandscapeLeft') else 'ccw'
+        o = str(self.emu.info.get('UIInterfaceOrientation', ''))
+        if 'Landscape' in o:
+            return 'cw' if o.endswith('LandscapeLeft') else 'ccw'
+        ui = getattr(self.emu, 'ui', None)
+        return {4: 'cw', 3: 'ccw'}.get(getattr(ui, 'orientation', 1))
 
     def eagl_storage_from_drawable(self):
         guest, _cmd, target, layer = self.args(4)
