@@ -1,4 +1,4 @@
-# iOS userland emulator prototype (PocketOuya iPhone section, experiment)
+# iOS userland emulator prototype (PocketPear)
 
 Runs an iPhone app's ARM code with Apple's own dyld and frameworks, taken from a firmware
 root filesystem the user supplies, under a CPU emulator (Unicorn). Only the kernel is
