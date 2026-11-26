@@ -1,7 +1,7 @@
 package com.hcode91.pocketpear
 
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.ActivityOptions
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -9,13 +9,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
-import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
-import android.widget.Button
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.widget.FrameLayout
+import kotlin.math.max
+import kotlin.math.min
 import android.widget.ImageView
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
@@ -30,7 +35,6 @@ import android.content.pm.ShortcutManager
 import android.graphics.Outline
 import android.view.ViewOutlineProvider
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import com.chaquo.python.PyObject
 import com.chaquo.python.Python
@@ -40,62 +44,104 @@ import org.json.JSONArray
 /** The game list, and importing the firmware and games. */
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
-    private lateinit var status: TextView
-    private lateinit var list: LinearLayout
     private lateinit var py: PyObject
     private var busy = false
-    private lateinit var access: Button
+    private lateinit var banner: Banner
+    private lateinit var pager: Pager
+    private lateinit var dots: PageDots
+    private lateinit var statusBar: StatusBar
+    private lateinit var dock: LinearLayout
+    private var bannerTap: () -> Unit = {}
+    private val icons = HashMap<String, Bitmap>()
+    private var ready = false
+    private var apps = JSONArray()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         py = pocketpear(this)
+        edgeToEdge()
 
-        val pad = dp(16)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-            setBackgroundColor(Color.rgb(24, 24, 30))
+        val root = FrameLayout(this).apply { background = Wallpaper() }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(col, FrameLayout.LayoutParams(-1, -1))
+
+        statusBar = StatusBar(this)
+        col.addView(statusBar, LinearLayout.LayoutParams(-1, dp(44)))
+
+        banner = Banner(this).apply { setOnClickListener { bannerTap() }; visibility = View.GONE }
+        col.addView(banner, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(10), dp(2), dp(10), dp(6)) })
+
+        pager = Pager(this)
+        col.addView(pager, LinearLayout.LayoutParams(-1, 0, 1f))
+        dots = PageDots(this)
+        pager.onPage = { dots.current = it }
+        pager.onResize = { buildPages(apps) }
+        col.addView(dots, LinearLayout.LayoutParams(-1, dp(26)))
+
+        // the dock: PocketPear's own tools
+        dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = Skin.card(this@MainActivity, 0x38FFFFFF, 30f)
+            setPadding(dp(6), dp(6), dp(6), dp(2))
         }
-        root.addView(TextView(this).apply {
-            text = "PocketPear"
-            textSize = 26f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.rgb(181, 211, 61))
-        })
-        root.addView(TextView(this).apply {
-            text = "Prototype: runs iOS 6 games on the real iOS libraries. Very slow for now - a few game seconds a minute."
-            setTextColor(Color.LTGRAY)
-            setPadding(0, dp(4), 0, dp(12))
-        })
-        status = TextView(this).apply { setTextColor(Color.WHITE) }
-        root.addView(status)
+        dockTool("Firmware", ToolIcon.Kind.FIRMWARE) { pick(REQ_FIRMWARE) }
+        dockTool("Add Game", ToolIcon.Kind.ADD) { pick(REQ_IPA) }
+        dockTool("Saves", ToolIcon.Kind.FOLDER) { saves() }
+        dockTool("Log", ToolIcon.Kind.LOG) { GameActivity.copyLog(this@MainActivity, py) }
+        col.addView(dock, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(10), 0, dp(10), dp(10)) })
 
-        // stacked, full width: side by side, a long label pushes the other button off screen
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        buttons.addView(Button(this).apply {
-            text = "Import firmware"
-            setOnClickListener { pick(REQ_FIRMWARE) }
-        }, LinearLayout.LayoutParams(-1, -2))
-        buttons.addView(Button(this).apply {
-            text = "Import game (.ipa)"
-            setOnClickListener { pick(REQ_IPA) }
-        }, LinearLayout.LayoutParams(-1, -2))
-        access = Button(this).apply {
-            text = "Allow file access (saves go in Internal storage/PocketPear)"
-            setOnClickListener { askForFileAccess() }
+        // room for the camera hole at the top and the gesture bar at the bottom
+        root.setOnApplyWindowInsetsListener { _, ins ->
+            var top = 0
+            if (Build.VERSION.SDK_INT >= 28) top = ins.displayCutout?.safeInsetTop ?: 0
+            @Suppress("DEPRECATION")
+            val bottom = ins.systemWindowInsetBottom
+            statusBar.layoutParams = statusBar.layoutParams.apply { height = max(dp(34), top) + dp(10) }
+            col.setPadding(0, 0, 0, bottom)
+            ins
         }
-        buttons.addView(access, LinearLayout.LayoutParams(-1, -2))
-        buttons.addView(Button(this).apply {
-            text = "Copy last game's log"
-            setOnClickListener { GameActivity.copyLog(this@MainActivity, py) }
-        }, LinearLayout.LayoutParams(-1, -2))
-        root.addView(buttons)
-
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         refresh()
         launchRequested(intent)
+    }
+
+    /** Draw behind the system bars and hide Android's status bar: PocketPear draws its own. */
+    @Suppress("DEPRECATION")
+    private fun edgeToEdge() {
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 28) window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        if (Build.VERSION.SDK_INT >= 30) window.insetsController?.let {
+            it.hide(WindowInsets.Type.statusBars())
+            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) edgeToEdge()          // the status bar comes back after dialogs and swipes
+    }
+
+    private fun dockTool(label: String, kind: ToolIcon.Kind, action: () -> Unit) {
+        val t = IconTile(this, label, dp(56))
+        t.image.setImageDrawable(ToolIcon(kind))
+        t.isClickable = true
+        t.setOnClickListener { action() }
+        dock.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
+    }
+
+    private fun saves() {
+        if (hasFileAccess(this)) Sheets.alert(this, "Saves",
+            "Games keep their saves and settings in Internal storage/PocketPear/data, where you can back them up.")
+        else Sheets.alert(this, "Keep saves where you can see them?",
+            "PocketPear needs file access to keep games' saves in Internal storage/PocketPear, where you can back them up. Without it they stay private to the app.",
+            Sheets.Choice("Not Now"), Sheets.Choice("Allow", preferred = true) { askForFileAccess() })
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -135,12 +181,12 @@ class MainActivity : Activity() {
     private fun turnLabel(path: String) = turnNames[turns.indexOf(prefs().getString("turn:$path", "auto")).coerceAtLeast(0)]
     private fun chooseTurn(name: String, path: String) {
         val now = turns.indexOf(prefs().getString("turn:$path", "auto")).coerceAtLeast(0)
-        AlertDialog.Builder(this).setTitle("Turn $name's picture")
-            .setSingleChoiceItems(turnNames, now) { d, which ->
+        Sheets.actionSheet(this, "Turn $name's picture", turns.indices.map { which ->
+            Sheets.Choice(turnNames[which].replaceFirstChar { it.uppercase() }, checked = which == now) {
                 prefs().edit().putString("turn:$path", turns[which]).apply()
                 toast("$name: ${turnNames[which]}, from its next start.")
-                d.dismiss()
-            }.show()
+            }
+        })
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -170,92 +216,136 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        access.visibility = if (hasFileAccess(this)) View.GONE else View.VISIBLE
-        val ready = py.callAttr("firmware_ready", filesDir.absolutePath).toBoolean()
-        status.text = if (ready) "Firmware: ready (iPhone 5, iOS 6)" else
-            "Firmware: not imported. Import the iPhone 5 iOS 6 firmware first: the .dmg, a .zip of it, or all its split parts (.001, .002, ...) picked together."
-        list.removeAllViews()
-        val apps = JSONArray(py.callAttr("list_apps", filesDir.absolutePath).toString())
+        ready = py.callAttr("firmware_ready", filesDir.absolutePath).toBoolean()
+        if (!busy) showBanner()
+        apps = JSONArray(py.callAttr("list_apps", filesDir.absolutePath).toString())
+        if (pager.height > 0) buildPages(apps)      // otherwise once the pager has its size
+
+    }
+
+    private fun showBanner() {
+        when {
+            !ready -> {
+                banner.set("Firmware needed", "Tap here or Firmware in the dock to import the iPhone 5 iOS 6 firmware: the .dmg, a .zip of it, or all its split parts (.001, .002, ...) picked together.")
+                bannerTap = { pick(REQ_FIRMWARE) }
+                banner.visibility = View.VISIBLE
+            }
+            !hasFileAccess(this) -> {
+                banner.set("Saves are private", "Tap to keep games' saves in Internal storage/PocketPear, where you can back them up.")
+                bannerTap = { saves() }
+                banner.visibility = View.VISIBLE
+            }
+            else -> banner.visibility = View.GONE
+        }
+    }
+
+    /** The games as home screen pages of icons, as many rows as fit. */
+    private fun buildPages(apps: JSONArray) {
+        if (pager.height == 0) return
+        pager.removeAllViews()
+        val landscape = pager.width > pager.height
+        val cols = if (landscape) 7 else 4
+        val tileH = dp(100)
+        val rows = max(1, (pager.height - dp(12)) / tileH)
+        val perPage = cols * rows
         if (apps.length() == 0) {
-            list.addView(TextView(this).apply {
-                text = "No games yet. Import a decrypted .ipa."
-                setTextColor(Color.GRAY)
-                setPadding(0, dp(16), 0, 0)
-            })
+            pager.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                addView(TextView(this@MainActivity).apply {
+                    text = "No Games"; textSize = 22f; typeface = Skin.bold; setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "Tap Add Game in the dock to import a decrypted .ipa."
+                    textSize = 15f; setTextColor(0xCCFFFFFF.toInt()); gravity = Gravity.CENTER
+                    setPadding(dp(32), dp(6), dp(32), 0)
+                })
+            }, FrameLayout.LayoutParams(-1, -1))
         }
-        for (i in 0 until apps.length()) {
-            val a = apps.getJSONObject(i)
-            val name = a.getString("name")
-            val path = a.getString("path")
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(8), dp(10), dp(8), dp(10))
+        val pageCount = (apps.length() + perPage - 1) / perPage
+        for (pg in 0 until pageCount) {
+            val page = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(12), dp(8), 0)
             }
-            // the game's own icon, rounded like on the home screen; loaded off the UI thread,
-            // since a crushed PNG is rewritten the first time
-            val icon = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setBackgroundColor(Color.DKGRAY)
-                outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, v.width * 0.18f)
+            var row: LinearLayout? = null
+            for (i in pg * perPage until min(apps.length(), (pg + 1) * perPage)) {
+                if ((i - pg * perPage) % cols == 0) {
+                    row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; weightSum = cols.toFloat() }
+                    page.addView(row, LinearLayout.LayoutParams(-1, tileH))
                 }
-                clipToOutline = true
+                val a = apps.getJSONObject(i)
+                row!!.addView(gameTile(a.getString("name"), a.getString("path")), LinearLayout.LayoutParams(0, -2, 1f))
             }
-            row.addView(icon, LinearLayout.LayoutParams(dp(56), dp(56)))
-            Thread {
-                val file = try { py.callAttr("app_icon", filesDir.absolutePath, path).toString() } catch (e: Exception) { "" }
-                val bmp = if (file.isNotEmpty()) BitmapFactory.decodeFile(file) else null
-                if (bmp != null) ui.post { icon.setImageBitmap(bmp); icon.setBackgroundColor(Color.TRANSPARENT) }
-            }.start()
-            row.addView(TextView(this).apply {
-                text = name
-                textSize = 20f
-                setTextColor(Color.WHITE)
-                setPadding(dp(14), 0, 0, 0)
-            }, LinearLayout.LayoutParams(0, -2, 1f))
-            list.addView(row.apply {
-                setOnClickListener {
-                    if (!ready) { toast("Import the firmware first."); return@setOnClickListener }
-                    startActivity(Intent(this@MainActivity, GameActivity::class.java)
-                        .putExtra("app", path).putExtra("name", name)
-                        .putExtra("realtime", realtime(path)))
-                }
-                setOnLongClickListener {
-                    val where = py.callAttr("data_path", path).toString()
-                    val clock = if (realtime(path)) "Game speed: real time (tap for slow motion)"
-                                else "Game speed: slow motion when behind (tap for real time)"
-                    AlertDialog.Builder(this@MainActivity).setTitle(name)
-                        .setItems(arrayOf("Clear game data", "Remove game", clock, "Add to home screen",
-                                          "Turn picture: ${turnLabel(path)}")) { _, which ->
-                            if (which == 4) chooseTurn(name, path)
-                            else if (which == 3) addShortcut(name, path)
-                            else if (which == 2) {
-                                val on = !realtime(path)
-                                prefs().edit().putBoolean("realtime:$path", on).apply()
-                                toast(if (on) "$name keeps real time: proper speed, fewer frames when the phone can't keep up."
-                                      else "$name slows down when the phone can't keep up: smoother, but in slow motion.")
-                            }
-                            else if (which == 0) AlertDialog.Builder(this@MainActivity)
-                                .setTitle("Clear $name's data?")
-                                .setMessage("Deletes its saves and settings, as reinstalling it did on an iPhone. The game stays installed.\n\n$where")
-                                .setPositiveButton("Clear") { _, _ -> py.callAttr("clear_data", path); toast("$name's data cleared.") }
-                                .setNegativeButton("Cancel", null).show()
-                            else AlertDialog.Builder(this@MainActivity).setTitle("Remove $name?")
-                                .setMessage("Its saves and settings are kept.")
-                                .setPositiveButton("Remove") { _, _ ->
-                                    py.callAttr("remove_app", path)
-                                    getSystemService(ShortcutManager::class.java)?.disableShortcuts(
-                                        listOf(shortcutId(path)), "$name was removed from PocketPear.")
-                                    refresh()
-                                }
-                                .setNegativeButton("Cancel", null).show()
-                        }.show()
-                    true
-                }
-            })
-            list.addView(View(this).apply { setBackgroundColor(Color.DKGRAY) }, LinearLayout.LayoutParams(-1, 1))
+            pager.addView(page, FrameLayout.LayoutParams(-1, -1))
         }
+        dots.count = pageCount
+        pager.show(min(pager.page, max(0, pageCount - 1)), false)
+    }
+
+    private fun gameTile(name: String, path: String): IconTile {
+        val tile = IconTile(this, name, dp(62))
+        tile.image.setBackgroundColor(0x40FFFFFF)
+        val cached = icons[path]
+        if (cached != null) { tile.image.setImageBitmap(cached); tile.image.setBackgroundColor(Color.TRANSPARENT) }
+        // the game's own icon, read from its bundle off the UI thread: a crushed PNG is
+        // rewritten the first time
+        else Thread {
+            val file = try { py.callAttr("app_icon", filesDir.absolutePath, path).toString() } catch (e: Exception) { "" }
+            val bmp = if (file.isNotEmpty()) BitmapFactory.decodeFile(file) else null
+            if (bmp != null) ui.post {
+                icons[path] = bmp
+                tile.image.setImageBitmap(bmp); tile.image.setBackgroundColor(Color.TRANSPARENT)
+            }
+        }.start()
+        tile.isClickable = true
+        tile.setOnClickListener {
+            if (!ready) { toast("Import the firmware first."); return@setOnClickListener }
+            val v = tile.image
+            // opens out of its icon, as on a phone's home screen
+            val zoom = ActivityOptions.makeScaleUpAnimation(v, 0, 0, v.width, v.height).toBundle()
+            startActivity(Intent(this, GameActivity::class.java)
+                .putExtra("app", path).putExtra("name", name)
+                .putExtra("realtime", realtime(path)), zoom)
+        }
+        tile.setOnLongClickListener {
+            tile.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            gameMenu(name, path)
+            true
+        }
+        return tile
+    }
+
+    private fun gameMenu(name: String, path: String) {
+        val where = py.callAttr("data_path", path).toString()
+        val rt = realtime(path)
+        Sheets.contextMenu(this, icons[path], name, listOf(
+            Sheets.Choice("Add to Home Screen") { addShortcut(name, path) },
+            Sheets.Choice(if (rt) "Speed: Real Time" else "Speed: Slow Motion When Behind") {
+                val on = !rt
+                prefs().edit().putBoolean("realtime:$path", on).apply()
+                toast(if (on) "$name keeps real time: proper speed, fewer frames when the phone can't keep up."
+                      else "$name slows down when the phone can't keep up: smoother, but in slow motion.")
+            },
+            Sheets.Choice("Turn Picture: ${turnLabel(path).replaceFirstChar { it.uppercase() }}") { chooseTurn(name, path) },
+            Sheets.Choice("Clear Data", destructive = true) {
+                Sheets.alert(this, "Clear $name's data?",
+                    "Deletes its saves and settings, as reinstalling it did on an iPhone. The game stays installed.\n\n$where",
+                    Sheets.Choice("Cancel"),
+                    Sheets.Choice("Clear", destructive = true) { py.callAttr("clear_data", path); toast("$name's data cleared.") })
+            },
+            Sheets.Choice("Remove Game", destructive = true) {
+                Sheets.alert(this, "Remove $name?", "Its saves and settings are kept.",
+                    Sheets.Choice("Cancel"),
+                    Sheets.Choice("Remove", destructive = true) {
+                        py.callAttr("remove_app", path)
+                        icons.remove(path)
+                        getSystemService(ShortcutManager::class.java)?.disableShortcuts(
+                            listOf(shortcutId(path)), "$name was removed from PocketPear.")
+                        refresh()
+                    })
+            }))
     }
 
     private fun shortcutId(path: String) = "game:" + java.io.File(path).name
@@ -330,7 +420,7 @@ class MainActivity : Activity() {
         }
         if (fds.isEmpty()) return
         busy = true
-        status.text = "Importing..."
+        banner.set("Importing", "Starting...", 0); banner.visibility = View.VISIBLE; bannerTap = {}
         Thread {
             val msg = try {
                 if (requestCode == REQ_FIRMWARE)
@@ -355,11 +445,11 @@ class MainActivity : Activity() {
     inner class Progress {
         @Suppress("unused")
         fun onProgress(label: String, pct: Int) {
-            ui.post { status.text = "Importing $label: $pct%" }
+            ui.post { banner.set("Importing $label", "$pct%", pct) }
         }
     }
 
-    private fun toast(s: String) = AlertDialog.Builder(this).setMessage(s).setPositiveButton("OK", null).show()
+    private fun toast(s: String) = Sheets.alert(this, null, s)
 
     companion object {
         const val REQ_FIRMWARE = 1

@@ -35,15 +35,22 @@ and OpenGL ES 2 games all run.
 
 ## Using the app
 
-- **Firmware:** *Import firmware* takes the iPhone 5 (iOS 6) root filesystem (details below).
-- **Games:** *Import game (.ipa)* adds a game; the list shows each game's own icon. Tap a game
-  to play it. Each game runs in its own process, so Back ends it cleanly.
-- **Long-press a game** to clear its data, remove it, add it to the home screen, turn its picture
-  if a landscape game shows sideways, or choose its speed: *slow motion when behind* (the
-  default) or *real time*.
+PocketPear looks like a phone's home screen: your games as icons over a wallpaper, with
+PocketPear's own tools in the dock at the bottom. It's all drawn by PocketPear itself, with no
+images, icons or fonts from Apple.
+
+- **Firmware** (dock): import the iPhone 5 (iOS 6) root filesystem (details below).
+- **Add Game** (dock): import a decrypted `.ipa`. Each game shows its own icon. Swipe sideways
+  if you have more games than fit on one page.
+- **Tap a game** to play it. It opens out of its icon. Each game runs in its own process, so
+  Back ends it cleanly.
+- **Long-press a game** for its menu: add it to the Android home screen, choose its speed
+  (*slow motion when behind*, the default, or *real time*), turn its picture if a landscape
+  game shows sideways, clear its data, or remove it.
+- **Saves** (dock): saves are kept in Internal storage/PocketPear, where you can back them up,
+  once you allow file access.
+- **Log** (dock), or **Copy log** on the game screen: copies the last run's log, for bug reports.
 - **Controls:** touch, with every finger passed to the game (multi-touch).
-- **Saves** are kept where you can see and back them up.
-- **Copy log** on the game screen copies the run's log, for bug reports.
 - **Starting a game from another app** (such as BacklogQuest): send an intent with the action
   `com.hcode91.pocket.LAUNCH_GAME` to `com.hcode91.pocketpear` with a `game_id` extra holding
   the game's name or bundle ID.
