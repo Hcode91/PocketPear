@@ -42,8 +42,21 @@ jobs:
       - name: Build the CPU core (dynarmic)
         run: android/build-ppcpu.sh "$ANDROID_NDK_LATEST_HOME"
 
+      - name: Signing key (if the repository has one)
+        env:
+          KS_B64: ${{ secrets.POCKETPEAR_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/pocketpear.jks"
+            echo "POCKETPEAR_KEYSTORE=$RUNNER_TEMP/pocketpear.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Build APK
         working-directory: android
+        env:
+          POCKETPEAR_KEYSTORE_PASSWORD: ${{ secrets.POCKETPEAR_KEYSTORE_PASSWORD }}
+          POCKETPEAR_KEY_ALIAS: ${{ secrets.POCKETPEAR_KEY_ALIAS }}
+          POCKETPEAR_KEY_PASSWORD: ${{ secrets.POCKETPEAR_KEY_PASSWORD }}
         run: ./gradlew assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@v4

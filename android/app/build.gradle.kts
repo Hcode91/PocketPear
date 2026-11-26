@@ -18,19 +18,30 @@ android {
     }
 
     signingConfigs {
-        // A fixed key checked into the (private) repo, so each CI build installs over the last.
+        // A fixed test key checked into the repo, so each test build installs over the last.
         create("shared") {
             storeFile = file("pocketpear-debug.keystore")
             storePassword = "pocketpear"
             keyAlias = "pocketpear"
             keyPassword = "pocketpear"
         }
+        // The owner's own key, from CI secrets (see README, Building). Without it, the shared key.
+        System.getenv("POCKETPEAR_KEYSTORE")?.takeIf { it.isNotEmpty() }?.let { ks ->
+            create("own") {
+                storeFile = file(ks)
+                storePassword = System.getenv("POCKETPEAR_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("POCKETPEAR_KEY_ALIAS")?.takeIf { it.isNotEmpty() } ?: "pocketpear"
+                keyPassword = System.getenv("POCKETPEAR_KEY_PASSWORD")?.takeIf { it.isNotEmpty() }
+                    ?: System.getenv("POCKETPEAR_KEYSTORE_PASSWORD")
+            }
+        }
     }
+    val signing = signingConfigs.findByName("own") ?: signingConfigs.getByName("shared")
     buildTypes {
-        getByName("debug") { signingConfig = signingConfigs.getByName("shared") }
+        getByName("debug") { signingConfig = signing }
         getByName("release") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("shared")
+            signingConfig = signing
         }
     }
     compileOptions {
